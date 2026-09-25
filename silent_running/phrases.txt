@@ -1,0 +1,31 @@
+# Silent Running phrase inventory (Phrase Mode). One phrase per line.
+I need water
+I am in pain
+I can't breathe
+Call my family
+I need the nurse
+Please suction
+I am cold
+I am hot
+Turn me over
+I need medication
+Yes
+No
+I need help
+Thank you
+I feel sick
+I need to use the bathroom
+I want to sit up
+I want to lie down
+Please call the doctor
+Where am I
+What time is it
+I am scared
+I am tired
+Please turn off the light
+Please turn on the TV
+I need my glasses
+My chest hurts
+My head hurts
+I feel dizzy
+I am hungry
