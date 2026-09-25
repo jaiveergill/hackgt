@@ -146,13 +146,38 @@ class VSREngine:
         return [self.tok2id.get(p, self.tok2id["<unk>"]) for p in pieces]
 
     @torch.no_grad()
-    def score_phrases(self, enc, phrases):
+    def ctc_scores(self, enc, phrases):
+        """CTC log-likelihood of each phrase (cheap, vectorized). Used to prefilter big inventories."""
+        toks = [self.tokenize(p) for p in phrases]
+        ctc_lp = self.model.ctc.log_softmax(enc.unsqueeze(0))[0].cpu().float()
+        B, T = len(toks), ctc_lp.size(0)
+        targets = torch.cat([torch.tensor(t) for t in toks]); tgt_lens = torch.tensor([len(t) for t in toks]); in_lens = torch.full((B,), T, dtype=torch.long)
+        ctc = -F.ctc_loss(ctc_lp.unsqueeze(1).expand(-1, B, -1), targets, in_lens, tgt_lens, blank=0, reduction="none", zero_infinity=True)
+        return ctc.tolist()
+
+    @torch.no_grad()
+    def score_phrases(self, enc, phrases, prefilter=48):
         """Exact log p(phrase | video) under the pretrained model for every candidate phrase.
 
         Returns list of dicts sorted by combined score (descending):
           {phrase, att: attention-decoder log-lik, ctc: CTC log-lik, score: (1-w)*att + w*ctc, n_tok}
         Same weighting the beam search uses, so scores are comparable to beam hypotheses.
+        With a big inventory, only the top `prefilter` phrases by CTC score get the (expensive) attention decoder;
+        the rest are returned with a CTC-only estimate flagged `prefiltered_out`.
         """
+        if prefilter and len(phrases) > prefilter:
+            ctc_all = self.ctc_scores(enc, phrases)
+            order = sorted(range(len(phrases)), key=lambda i: -ctc_all[i])
+            keep = [phrases[i] for i in order[:prefilter]]
+            res = self._score_phrases_full(enc, keep)
+            floor = min(r["score"] for r in res)
+            for i in order[prefilter:]:
+                res.append({"phrase": phrases[i], "att": None, "ctc": ctc_all[i], "score": min(ctc_all[i], floor) - 1.0, "n_tok": 0, "prefiltered_out": True})
+            return res
+        return self._score_phrases_full(enc, phrases)
+
+    @torch.no_grad()
+    def _score_phrases_full(self, enc, phrases):
         dev = self.decode_device
         toks = [self.tokenize(p) for p in phrases]
         B = len(toks)
@@ -191,5 +216,20 @@ class VSREngine:
         return res
 
 
+def load_phrase_table(path=os.path.join(ROOT, "silent_running", "phrases.txt")):
+    """-> list of {phrase, category, critical}. '## name' lines start a category; trailing ' !' marks critical phrases."""
+    out, cat = [], "general"
+    for l in open(path):
+        l = l.strip()
+        if not l or l.startswith("# ") or l == "#":
+            continue
+        if l.startswith("## "):
+            cat = l[3:].strip().lower(); continue
+        crit = l.endswith(" !")
+        ph = l[:-2].strip() if crit else l
+        out.append({"phrase": ph, "category": cat, "critical": crit})
+    return out
+
+
 def load_phrases(path=os.path.join(ROOT, "silent_running", "phrases.txt")):
-    return [l.strip() for l in open(path) if l.strip() and not l.startswith("#")]
+    return [r["phrase"] for r in load_phrase_table(path)]

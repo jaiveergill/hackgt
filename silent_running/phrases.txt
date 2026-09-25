@@ -1,31 +1,226 @@
-# Silent Running phrase inventory (Phrase Mode). One phrase per line.
-I need water
+# Silent Running ICU phrase inventory. One phrase per line. "## name" starts a category.
+# Lines marked with a trailing " !" are critical: they trigger escalation when recognized with confidence.
+
+## urgent
+I can't breathe !
+I am choking !
+My chest hurts !
+I think I am having a heart attack !
+I need help right now !
+Call the doctor now !
+Something is wrong !
+I feel like I am going to pass out !
+I am bleeding !
+I can't feel my legs !
+I can't move my arm !
+The tube is hurting me !
+I need suction !
+I am in a lot of pain !
+Emergency !
+
+## pain
 I am in pain
-I can't breathe
-Call my family
-I need the nurse
-Please suction
+The pain is getting worse
+The pain is better now
+My head hurts
+My throat hurts
+My back hurts
+My stomach hurts
+My neck hurts
+My leg hurts
+My arm hurts
+It hurts when I breathe
+It hurts when I move
+It hurts here
+Rate my pain as a five
+Rate my pain as an eight
+I need pain medication
+The medication is not working
+I feel numb
+
+## breathing
+I am short of breath
+I need oxygen
+I need to cough
+Please suction my mouth
+The mask is too tight
+I need the mask adjusted
+I can breathe better now
+My nose is blocked
+I feel like I am drowning
+Can you sit me up so I can breathe
+
+## comfort
 I am cold
 I am hot
+I am sweating
+I need a blanket
+Take the blanket off
 Turn me over
-I need medication
-Yes
-No
-I need help
-Thank you
-I feel sick
-I need to use the bathroom
+Turn me on my left side
+Turn me on my right side
 I want to sit up
 I want to lie down
-Please call the doctor
-Where am I
-What time is it
-I am scared
-I am tired
+Raise the bed
+Lower the bed
+Adjust my pillow
+My legs are uncomfortable
+My arm is stuck
+Please move my arm
+Please move my leg
+Please scratch my nose
+My eyes are dry
+My lips are dry
+My mouth is dry
+I need ice chips
+Please wet my lips
+Please wipe my face
+Please brush my teeth
+The light is too bright
 Please turn off the light
-Please turn on the TV
+Please turn on the light
+It is too loud
+Please close the door
+Please open the window
+Please close the curtain
+I want to watch TV
+Please turn off the TV
+I want music
+Turn the volume down
+Turn the volume up
 I need my glasses
-My chest hurts
-My head hurts
-I feel dizzy
+I need my hearing aid
+Where is my phone
+I want my phone
+
+## needs
+I need water
+I am thirsty
 I am hungry
+I do not want to eat
+I want something to eat
+I feel nauseous
+I am going to throw up
+I need to use the bathroom
+I need to pee
+I need the bedpan
+I need to be changed
+I need medication
+I need my medication now
+I need a nurse
+I need a doctor
+I need help
+I need to rest
+I need to sleep
+I need a break
+Can I have a tissue
+Can I have some ice
+Can I have my inhaler
+
+## people
+Call my family
+Call my wife
+Call my husband
+Call my mother
+Call my father
+Call my daughter
+Call my son
+Where is my family
+Is my family here
+I want to see my family
+I want to be alone
+Please stay with me
+Please hold my hand
+Who are you
+What is your name
+Is the doctor coming
+When is the doctor coming
+Please get the nurse
+I want to talk to the chaplain
+I want a translator
+
+## questions
+Where am I
+What day is it
+What time is it
+What happened to me
+Why am I here
+How long have I been here
+When can I go home
+When can I eat
+When will the tube come out
+What is this medication
+What are you doing
+Is it serious
+Am I getting better
+What did the test show
+Can I have visitors
+Can I go outside
+Can I have a shower
+
+## feelings
+I am scared
+I am worried
+I am anxious
+I am tired
+I am exhausted
+I am sad
+I am frustrated
+I am confused
+I feel dizzy
+I feel sick
+I feel weak
+I feel better
+I feel much better
+I feel worse
+I cannot sleep
+I had a bad dream
+I am bored
+I am fine
+I am okay
+
+## answers
+Yes
+No
+Maybe
+I don't know
+Please
+Thank you
+Thank you very much
+Sorry
+Okay
+Not now
+Later
+Wait
+Stop
+More
+Less
+Again
+Slow down
+That is right
+That is wrong
+Good morning
+Good night
+Hello
+Goodbye
+I love you
+Please wait a moment
+Say that again
+I did not understand
+Speak slower
+
+## care
+I need a bath
+I need my hair washed
+I need to be shaved
+I need my dressing changed
+The bandage is too tight
+The IV hurts
+The IV is leaking
+This needle hurts
+I want this tube out
+The catheter hurts
+I feel the monitor beeping
+Can you check the machine
+Please check my line
+Please stop the alarm
