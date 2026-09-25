@@ -1,0 +1,28 @@
+[
+ {
+  "lm": 0.0,
+  "beam": 10,
+  "clip": "ted1_short.mp4",
+  "t_beam": 1.55,
+  "wer_beam": 0.0,
+  "top": "I'M GOING TO MAKE A LOT OF HAND GESTURES",
+  "llm": "I'M GOING TO MAKE A LOT OF HAND GESTURES",
+  "llm_vs_top": 0.0,
+  "accepted": true,
+  "wer_final": 0.0,
+  "t_llm": 1.1
+ },
+ {
+  "lm": 0.0,
+  "beam": 10,
+  "clip": "ted1_12s.mp4",
+  "t_beam": 8.29,
+  "wer_beam": 0.273,
+  "top": "YOU'VE HEARD SOMETHING I'M GOING TO MAKE A LOT OF HAND GESTURES I'M GOING TO DO THIS WITH MY RIGHT HAND I'M GOING TO DO THIS WITH MY LEFT I'M GOING TO USE JUST MY GLASSES",
+  "llm": "YOU'VE HEARD SOMETHING I'M GOING TO MAKE A LOT OF HAND GESTURES I'M GOING TO DO THIS WITH MY RIGHT HAND I'M GOING TO DO THIS WITH MY LEFT I'M GOING TO ADJUST MY GLASSES",
+  "llm_vs_top": -2.41,
+  "accepted": true,
+  "wer_final": 0.227,
+  "t_llm": 3.1
+ }
+]

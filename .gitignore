@@ -1,0 +1,13 @@
+.env
+.venv/
+models/*/*.pth
+models/auto_avsr/
+data/eval/*/
+__pycache__/
+*.pyc
+third_party/chaplin/webcam*.mp4
+.gstack/
+data/session/
+data/voices/
+data/tts_cache/
+models/adapted_*/

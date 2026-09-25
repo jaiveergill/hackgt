@@ -1,0 +1,331 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Silent Running</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root{--bg:#0b0f14;--panel:#121820;--panel2:#18212c;--line:#243040;--text:#e8eef5;--muted:#8a9bb0;--accent:#39d98a;--accent2:#4ea1ff;--warn:#ffb347;--bad:#ff5c6c;--mono:'JetBrains Mono',ui-monospace,monospace}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--text);font-family:Inter,system-ui,sans-serif}
+body{display:grid;grid-template-rows:56px 1fr;height:100vh}
+header{display:flex;align-items:center;gap:16px;padding:0 20px;border-bottom:1px solid var(--line);background:var(--panel)}
+header h1{font-size:18px;margin:0;letter-spacing:.5px;font-weight:800}
+header h1 span{color:var(--accent)}
+header .sub{color:var(--muted);font-size:12px}
+.spacer{flex:1}
+.toggle{display:flex;background:var(--panel2);border:1px solid var(--line);border-radius:10px;overflow:hidden}
+.toggle button{background:transparent;border:0;color:var(--muted);padding:8px 16px;font:600 13px Inter;cursor:pointer}
+.toggle button.on{background:var(--accent2);color:#04101f}
+main{display:grid;grid-template-columns:minmax(380px,44%) 1fr;gap:16px;padding:16px;min-height:0}
+.left{display:flex;flex-direction:column;gap:12px;min-height:0;overflow:auto}
+.cam{position:relative;background:#000;border-radius:14px;overflow:hidden;border:1px solid var(--line);aspect-ratio:4/3;flex-shrink:0}
+.cam img{width:100%;height:100%;object-fit:cover;display:block}
+.badge{position:absolute;left:12px;top:12px;display:flex;gap:8px;align-items:center;background:rgba(0,0,0,.55);padding:6px 10px;border-radius:8px;font:500 12px Inter;backdrop-filter:blur(4px)}
+.dot{width:10px;height:10px;border-radius:50%;background:var(--bad);box-shadow:0 0 0 0 rgba(0,0,0,0)}
+.dot.ok{background:var(--accent)}
+.dot.listen{background:var(--accent2);animation:pulse 1s infinite}
+@keyframes pulse{0%{box-shadow:0 0 0 0 rgba(78,161,255,.7)}100%{box-shadow:0 0 0 12px rgba(78,161,255,0)}}
+.state{position:absolute;right:12px;top:12px;background:rgba(0,0,0,.55);padding:6px 10px;border-radius:8px;font:600 12px Inter;letter-spacing:1px;text-transform:uppercase}
+.state.listening{color:var(--accent2)}.state.processing{color:var(--warn)}.state.idle{color:var(--muted)}
+.hint{position:absolute;left:0;right:0;bottom:0;padding:10px 12px;background:linear-gradient(transparent,rgba(0,0,0,.75));font-size:13px;color:#dfe8f2}
+.listen{height:84px;border-radius:14px;border:0;font:800 22px Inter;letter-spacing:1px;color:#04101f;background:var(--accent);cursor:pointer;transition:transform .05s,background .15s;user-select:none;-webkit-user-select:none}
+.listen:active,.listen.on{background:var(--accent2);transform:scale(.99)}
+.listen small{display:block;font:500 12px Inter;letter-spacing:0;opacity:.75;margin-top:2px}
+.row{display:flex;gap:10px}
+.btn{flex:1;background:var(--panel2);border:1px solid var(--line);color:var(--text);border-radius:10px;padding:10px 12px;font:600 14px Inter;cursor:pointer}
+.btn:hover{border-color:var(--accent2)}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:14px 16px}
+.panel h3{margin:0 0 8px;font:600 11px Inter;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted)}
+.right{display:flex;flex-direction:column;gap:12px;min-height:0;overflow:auto}
+.big{min-height:170px;display:flex;flex-direction:column;justify-content:center;flex-shrink:0}
+.big .text{font-size:clamp(34px,4.6vw,64px);font-weight:800;line-height:1.1;letter-spacing:-.5px;word-break:break-word}
+.big .text.placeholder{color:#2e3a4a}
+.big .text.long{font-size:clamp(22px,2.4vw,34px);line-height:1.25;font-weight:700}
+.big .text.mid{font-size:clamp(28px,3.4vw,46px);line-height:1.15}
+.big .conf{margin-top:10px;color:var(--muted);font-size:14px;display:flex;gap:16px;align-items:center;flex-wrap:wrap}
+.pill{display:inline-block;padding:3px 9px;border-radius:999px;font:600 11px Inter;letter-spacing:.5px;background:var(--panel2);border:1px solid var(--line)}
+.pill.ok{color:var(--accent);border-color:rgba(57,217,138,.4)}.pill.warn{color:var(--warn);border-color:rgba(255,179,71,.4)}.pill.ctx{color:var(--accent2);border-color:rgba(78,161,255,.4)}
+.cands{display:flex;flex-direction:column;gap:6px}
+.cand{display:grid;grid-template-columns:28px 1fr 64px;gap:10px;align-items:center;font-size:15px}
+.cand .bar{position:relative;height:26px;background:var(--panel2);border-radius:6px;overflow:hidden}
+.cand .bar i{position:absolute;left:0;top:0;bottom:0;background:linear-gradient(90deg,rgba(57,217,138,.35),rgba(57,217,138,.7));border-radius:6px}
+.cand .bar i.vis{background:linear-gradient(90deg,rgba(138,155,176,.25),rgba(138,155,176,.45))}
+.cand .bar span{position:absolute;left:10px;top:0;line-height:26px;font-weight:600}
+.cand .bar .tag{position:absolute;right:8px;top:0;line-height:26px;font:500 10px var(--mono);color:var(--accent2)}
+.cand .pct{text-align:right;font:500 13px var(--mono);color:var(--muted)}
+.cand .idx{color:var(--muted);font:500 12px var(--mono);text-align:right}
+.mono{font-family:var(--mono);font-size:13px}
+.raw{color:#c9d5e3}
+.raw .lbl{color:var(--muted);font-size:11px;letter-spacing:1px;text-transform:uppercase;margin-right:8px}
+.lat{color:var(--muted);font:500 11px var(--mono);margin-top:6px}
+.ctx{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.ctx label{display:block;color:var(--muted);font-size:11px;letter-spacing:1px;text-transform:uppercase;margin-bottom:4px}
+.ctx input,.ctx select,.ctx textarea{width:100%;background:var(--panel2);border:1px solid var(--line);color:var(--text);border-radius:8px;padding:8px 10px;font:14px Inter}
+.ctx textarea{grid-column:1/3;min-height:44px;resize:vertical}
+.hist{display:flex;gap:6px;flex-wrap:wrap;margin-top:6px}
+.hist span{background:var(--panel2);border:1px solid var(--line);padding:3px 8px;border-radius:6px;font-size:12px;color:var(--muted)}
+.llm{border-left:3px solid var(--accent2);padding-left:10px;color:#c9d5e3;font-size:14px}
+.llm .why{color:var(--muted);font-size:12px;margin-top:2px}
+.small{color:var(--muted);font-size:12px}
+.err{color:var(--bad);font-size:13px}
+.settings{display:flex;gap:14px;align-items:center;flex-wrap:wrap;font-size:13px;color:var(--muted)}
+.settings label{display:flex;gap:6px;align-items:center;cursor:pointer}
+.meter{display:flex;gap:6px;align-items:center;font:500 11px var(--mono);color:var(--muted)}
+.meter b{display:inline-block;width:54px;height:6px;background:var(--panel2);border-radius:3px;overflow:hidden;vertical-align:middle}
+.meter b i{display:block;height:100%;background:var(--accent2)}
+.strip{display:flex;flex-direction:column;gap:4px;margin-top:8px}
+.strip .row2{position:relative;height:16px;background:var(--panel2);border-radius:4px}
+.strip .row2 span{position:absolute;top:0;bottom:0;border-radius:3px;font:500 10px var(--mono);line-height:16px;padding-left:4px;overflow:hidden;white-space:nowrap;color:#04101f}
+.strip .lbl{font:500 10px var(--mono);color:var(--muted)}
+.replay{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}
+.replay button{background:var(--panel2);border:1px solid var(--line);color:var(--text);border-radius:8px;padding:6px 10px;font:600 12px Inter;cursor:pointer}
+kbd{font:500 11px var(--mono);background:var(--panel2);border:1px solid var(--line);border-radius:5px;padding:1px 6px;color:var(--text)}
+details summary{cursor:pointer;color:var(--muted);font-size:12px;letter-spacing:1px;text-transform:uppercase}
+</style>
+</head>
+<body>
+<header>
+  <h1>SILENT <span>RUNNING</span></h1>
+  <div class="sub">Silent speech → visual speech recognition → voice &nbsp;·&nbsp; <span id="engine" class="mono"></span></div>
+  <div class="spacer"></div>
+  <div class="toggle" id="mode">
+    <button data-mode="phrase" class="on">Phrase Mode</button>
+    <button data-mode="open">Open Mode</button>
+  </div>
+</header>
+<main>
+  <section class="left">
+    <div class="cam">
+      <img id="cam" src="/stream" alt="webcam">
+      <div class="badge"><div class="dot" id="dot"></div><span id="track">looking for face…</span></div>
+      <div class="badge meter" id="meter" style="top:44px">expr <span>angry <b><i id="m_angry"></i></b></span><span>warm <b><i id="m_warm"></i></b></span><span>sad <b><i id="m_sad"></i></b></span></div>
+      <div class="state idle" id="state">idle</div>
+      <div class="hint" id="hint">Face the camera, ~50 cm away, mouth lit from the front. Hold <kbd>Listen</kbd> (or <kbd>space</kbd>), mouth the phrase silently, release.</div>
+    </div>
+    <button class="listen" id="listen">HOLD TO LISTEN<small>or hold the space bar</small></button>
+    <div class="row">
+      <button class="btn" id="speak">🔊 Speak again</button>
+      <button class="btn" id="clear">Clear</button>
+    </div>
+    <div class="panel">
+      <h3>Context (adjusts ranking, never invents phrases)</h3>
+      <div class="ctx">
+        <div><label>Nurse just said / asked</label><input id="prompt" placeholder="e.g. Do you want some water?"></div>
+        <div><label>Patient category</label><select id="category"><option value="">— none —</option><option>pain</option><option>breathing</option><option>comfort</option><option>people</option><option>needs</option><option>answers</option><option>status</option></select></div>
+        <textarea id="notes" placeholder="Situation notes, e.g. post-op day 1, reported chest discomfort earlier"></textarea>
+      </div>
+      <div class="hist" id="hist"></div>
+    </div>
+    <div class="panel settings">
+      <label><input type="checkbox" id="autolisten"> hands-free (auto-detect mouth movement)</label>
+      <label><input type="checkbox" id="autospeak" checked> auto-speak</label>
+      <label><input type="checkbox" id="expressive" checked> expressive delivery (face → emotion, mouth → timing)</label>
+      <label>force <select id="override"><option value="">from face</option><option>angry</option><option>warm</option><option>sad</option><option>surprised</option><option value="neutral">neutral</option></select></label>
+      <label><input type="checkbox" id="llm" checked> LLM assist (Open Mode)</label>
+      <label>voice <select id="voice"></select></label>
+      <button class="btn" id="clonebtn" style="flex:0;white-space:nowrap">🎙 Clone my voice</button><span id="clonestat" class="small"></span>
+      <details><summary>eval</summary><div class="row" style="margin-top:6px"><input id="speaker" placeholder="speaker" style="width:100px;background:var(--panel2);border:1px solid var(--line);color:var(--text);border-radius:8px;padding:6px"><button class="btn" id="save">Save last 6 s as sample of selected phrase</button></div></details>
+    </div>
+  </section>
+  <section class="right">
+    <div class="panel big">
+      <div class="text placeholder" id="bigtext">Hold Listen and mouth a phrase</div>
+      <div class="conf" id="conf"></div>
+    </div>
+    <div class="panel">
+      <h3 id="candtitle">Candidate phrases · visual likelihood + context</h3>
+      <div class="cands" id="cands"><div class="small">Waiting for an utterance…</div></div>
+    </div>
+    <div class="panel">
+      <h3>What the visual model actually saw</h3>
+      <div class="raw mono" id="raw"><span class="lbl">raw</span><span class="small">—</span></div>
+      <div class="raw mono" id="nbest"></div>
+      <div class="lat" id="lat"></div>
+      <div class="err" id="err"></div>
+    </div>
+    <div class="panel" id="delivpanel">
+      <h3>Delivery · your face sets the emotion, your mouth sets the timing</h3>
+      <div id="deliv" class="small">No utterance yet.</div>
+      <div class="strip" id="strip"></div>
+      <div class="replay" id="replay"></div>
+    </div>
+    <div class="panel">
+      <details><summary>Supported phrases (Phrase Mode) · <span id="nphr"></span></summary>
+      <div class="hist" id="phrlist" style="margin-top:8px"></div></details>
+    </div>
+    <div class="panel" id="llmpanel" style="display:none">
+      <h3>Contextual decoding · LLM proposes, visual model verifies</h3>
+      <div class="llm" id="llmout"></div>
+    </div>
+  </section>
+</main>
+<script>
+const $=s=>document.querySelector(s);
+let ws, wsm, mode='phrase', last=null, phrases=[], speaking=false;
+const voices={list:[],pick:null};
+function fmtPct(p){return (p*100).toFixed(0)+'%'}
+function connect(){
+  ws=new WebSocket(`ws://${location.host}/ws`);
+  ws.onmessage=e=>handle(JSON.parse(e.data));
+  ws.onclose=()=>setTimeout(connect,1000);
+  wsm=new WebSocket(`ws://${location.host}/ws_meta`);
+  wsm.onmessage=e=>meta(JSON.parse(e.data));
+  wsm.onclose=()=>setTimeout(()=>{},0);
+}
+function send(o){if(ws&&ws.readyState===1)ws.send(JSON.stringify(o))}
+function meta(m){
+  meterUpdate(m);
+  const d=$('#dot'),t=$('#track');
+  if(m.listening){d.className='dot listen';}else d.className='dot'+(m.face?' ok':'');
+  if(!m.face)t.textContent='no face — look at the camera';
+  else{
+    let q=m.face_frac<0.09?'move closer':(m.face_frac>0.3?'a bit further':'good distance');
+    t.textContent=(m.listening?`listening · ${m.n_frames} frames`:`tracking mouth · ${q}`)+` · ${m.fps.toFixed(0)} fps`+(m.auto?` · motion ${m.energy.toFixed(1)}/${m.noise.toFixed(1)}`:'');
+  }
+}
+function meterUpdate(m){const ex=m.expression||{};['angry','warm','sad'].forEach(e=>{const el=document.getElementById('m_'+e);if(el)el.style.width=Math.min(100,(ex[e]||0)*100)+'%';});}
+function setState(s,extra){const el=$('#state');el.className='state '+s;el.textContent=s+(extra?' · '+extra:'');}
+function handle(m){
+  if(m.type==='hello'){phrases=m.phrases;applyCtx(m.context);mode=m.state.mode;document.querySelectorAll('#mode button').forEach(b=>b.classList.toggle('on',b.dataset.mode===mode));if(m.state.expressive!=null)$('#expressive').checked=m.state.expressive;$('#nphr').textContent=phrases.length+' phrases';$('#phrlist').innerHTML=phrases.map(p=>`<span>${p}</span>`).join('');$('#engine').textContent='';fetch('/api/state').then(r=>r.json()).then(s=>{$('#engine').textContent=`${s.engine.model} · encoder ${s.engine.device} / decoder ${s.engine.decode_device}`});}
+  else if(m.type==='status'){setState(m.status,m.stage);if(m.status==='processing'&&m.stage==='crop'){$('#err').textContent='';}}
+  else if(m.type==='raw'){$('#raw').innerHTML=`<span class="lbl">raw (CTC greedy)</span>${m.text||'<span class="small">(nothing)</span>'}`;$('#nbest').innerHTML='';$('#lat').textContent=`crop ${(m.latency.crop*1000).toFixed(0)} ms · encode ${(m.latency.encode*1000).toFixed(0)} ms · ${m.n_frames} frames (${m.duration.toFixed(1)} s)`;}
+  else if(m.type==='result'){last=m;render(m);if($('#autospeak').checked&&!(m.mode==='open'&&$('#llm').checked))speak(m.selected);}
+  else if(m.type==='nbest'){renderNbest(m.nbest);}
+  else if(m.type==='llm'){renderLLM(m);}
+  else if(m.type==='delivery'){const d=$('#delivrep');if(d){d.innerHTML=`delivered <b>${m.emotion}</b>${m.intensity?` ${(m.intensity*100).toFixed(0)}%`:''} · ${m.model}${m.tag?` · tag <code>${m.tag}</code>`:''} · stability ${m.stability} · speed ${m.rate.toFixed(2)}x · synth ${m.cached?'cached':m.t_synth+' s'}${m.retime&&m.retime.applied?` · retimed (global ${m.retime.global}x)`:(m.retime&&m.retime.reason?` · no retime: ${m.retime.reason}`:'')} · total ${m.total} s`;}renderAudioStrip(m.retime);}
+  else if(m.type==='error'){$('#err').textContent=m.message;setState('idle');}
+  else if(m.type==='context'){applyCtx(m.context);}
+  else if(m.type==='state'){mode=m.state.mode;document.querySelectorAll('#mode button').forEach(b=>b.classList.toggle('on',b.dataset.mode===mode));}
+  else if(m.type==='prewarmed'){$('#clonestat').textContent=`voice “${m.speaker}” ready · ${m.n} phrase variants cached`;}
+  else if(m.type==='saved'){$('#err').style.color='var(--accent)';$('#err').textContent='saved '+m.file+' as "'+m.phrase+'"';setTimeout(()=>{$('#err').style.color='';$('#err').textContent=''},3000);}
+}
+function render(m){
+  const bt=$('#bigtext');bt.className='text'+(m.selected.length>90?' long':(m.selected.length>36?' mid':''));bt.textContent=m.selected.toUpperCase();
+  const conf=$('#conf');let pills='';
+  const c=m.confidence;
+  pills+=`<span class="pill ${c>0.7?'ok':'warn'}">confidence ${fmtPct(c)}</span>`;
+  if(m.mode==='phrase'){
+    pills+=`<span class="pill">margin ${m.margin.toFixed(1)} nats</span>`;
+    if(m.in_inventory===false)pills+=`<span class="pill warn">weak match: model's free transcript fits ${m.phrase_gap.toFixed(1)} nats better — maybe not one of the phrases</span>`;
+    if(m.context_changed_choice)pills+=`<span class="pill ctx">context changed choice: visual top was “${m.visual_top}”</span>`;
+    else pills+=`<span class="pill">visual model's own top choice</span>`;
+  }else{pills+=`<span class="pill">open vocabulary · beam search</span>`;}
+  pills+=`<span class="small">${(m.latency.total*1000).toFixed(0)} ms after release</span>`;
+  conf.innerHTML=pills;
+  renderDelivery(m);
+  const cd=$('#cands');cd.innerHTML='';
+  if(m.mode==='phrase'){
+    $('#candtitle').textContent='Candidate phrases · visual likelihood → with context';
+    const mx=Math.max(...m.ranking.map(r=>r.final_prob));
+    m.ranking.forEach((r,i)=>{
+      const div=document.createElement('div');div.className='cand';
+      const tag=r.reasons.length?`<b class="tag">+${r.prior.toFixed(1)} ${r.reasons.join(', ')}</b>`:'';
+      div.innerHTML=`<div class="idx">${i+1}</div><div class="bar"><i class="vis" style="width:${(r.vsr_prob/mx*100).toFixed(1)}%"></i><i style="width:${(r.final_prob/mx*100).toFixed(1)}%;opacity:.8"></i><span>${r.phrase}</span>${tag}</div><div class="pct">${fmtPct(r.final_prob)}</div>`;
+      div.title=`VSR log-lik ${r.vsr_score.toFixed(2)} (att ${r.att.toFixed(1)}, ctc ${r.ctc.toFixed(1)}) · visual-only prob ${fmtPct(r.vsr_prob)} · prior +${r.prior.toFixed(2)}`;
+      div.onclick=()=>{speak(r.phrase);send({cmd:'confirm',text:r.phrase});};
+      cd.appendChild(div);
+    });
+    $('#llmpanel').style.display='none';
+  }else{
+    $('#candtitle').textContent='Visual hypotheses · beam search n-best';
+    renderNbest(m.nbest,true);
+    $('#llmpanel').style.display=$('#llm').checked?'':'none';$('#llmout').innerHTML='<span class="small">LLM proposing a correction from the visual hypotheses + context; the visual model will verify it…</span>';
+  }
+  const L=m.latency;$('#lat').textContent=Object.entries(L).map(([k,v])=>`${k} ${(v*1000).toFixed(0)} ms`).join(' · ')+` · ${m.n_frames} frames (${m.duration.toFixed(1)} s)`;
+}
+function renderDelivery(m){
+  const ex=m.expression||{emotion:'neutral',intensity:0},tm=m.timing;
+  let h=`<span class="pill ${ex.emotion==='neutral'?'':'ctx'}">face: ${ex.emotion}${ex.intensity?` ${(ex.intensity*100).toFixed(0)}%`:''}</span>`;
+  if(ex.scores)h+=` <span class="small">${Object.entries(ex.scores).map(([k,v])=>`${k} ${v.toFixed(2)}`).join(' · ')}</span>`;
+  if(tm)h+=` <span class="pill">mouthed ${tm.duration.toFixed(2)} s · rate ${tm.rate.toFixed(2)}x${tm.pauses.length?` · ${tm.pauses.length} pause${tm.pauses.length>1?'s':''}`:''}</span>`;
+  else h+=` <span class="small">no word timing</span>`;
+  h+=`<div id="delivrep" class="small" style="margin-top:4px">synthesis pending…</div>`;
+  $('#deliv').innerHTML=h;
+  const st=$('#strip');st.innerHTML='';
+  if(tm&&tm.words.length){const t0=tm.words[0].start,T=Math.max(tm.words[tm.words.length-1].end-t0,0.1);
+    st.innerHTML=`<div class="lbl">mouthed (video)</div><div class="row2" id="rowv"></div><div class="lbl">delivered (audio)</div><div class="row2" id="rowa"></div>`;
+    const rv=$('#rowv');tm.words.forEach((w,i)=>{const e=document.createElement('span');e.style.left=((w.start-t0)/T*100)+'%';e.style.width=((w.end-w.start)/T*100)+'%';e.style.background=i%2?'#39d98a':'#7fe7b3';e.textContent=w.word;rv.appendChild(e);});}
+  const rp=$('#replay');rp.innerHTML='<span class="small" style="line-height:28px">replay as:</span>';
+  [['neutral',0],['angry',0.9],['warm',0.9],['sad',0.8]].forEach(([e,i])=>{const b=document.createElement('button');b.textContent=e;b.onclick=()=>speak(m.selected,{emotion:e,intensity:i});rp.appendChild(b);});
+}
+function renderAudioStrip(rep){const ra=$('#rowa');if(!ra||!rep||!rep.audio_words||!rep.audio_words.length)return;const aw=rep.audio_words,t0=aw[0].start,T=Math.max(aw[aw.length-1].end-t0,0.1);ra.innerHTML='';aw.forEach((w,i)=>{const e=document.createElement('span');e.style.left=((w.start-t0)/T*100)+'%';e.style.width=((w.end-w.start)/T*100)+'%';e.style.background=i%2?'#4ea1ff':'#8fc4ff';e.textContent=w.word+(rep.ratios&&Math.abs(rep.ratios[i]-1)>0.05?` ×${rep.ratios[i]}`:'');ra.appendChild(e);});}
+function renderNbest(nb,intoCands){
+  if(!nb)return;
+  if(intoCands){const cd=$('#cands');cd.innerHTML='';const mx=Math.max(...nb.map(h=>h.prob));
+    nb.forEach((h,i)=>{const div=document.createElement('div');div.className='cand';div.innerHTML=`<div class="idx">${i+1}</div><div class="bar"><i style="width:${(h.prob/mx*100).toFixed(1)}%"></i><span>${pretty(h.text)||'(empty)'}</span><b class="tag">${h.score.toFixed(1)}</b></div><div class="pct">${fmtPct(h.prob)}</div>`;div.onclick=()=>speak(pretty(h.text));cd.appendChild(div);});
+  }else{$('#nbest').innerHTML=`<span class="lbl">beam n-best</span>`+nb.map(h=>`<div>${h.score.toFixed(2)}&nbsp; ${h.text||'(empty)'}</div>`).join('');}
+}
+function renderLLM(m){
+  if(!last||m.utt_id!==last.utt_id)return;
+  if(m.error){$('#llmout').innerHTML=`<span class="err">LLM unavailable: ${m.error}</span>`;if($('#autospeak').checked)speak(last.selected);return;}
+  const raw=pretty(last.nbest[0].text);
+  let verdict;
+  if(!m.changed)verdict=`<span class="pill ok">LLM agrees with the visual model</span>`;
+  else if(m.accepted)verdict=`<span class="pill ok">accepted · video supports it (${m.gap.toFixed(1)} nats vs raw)</span>`;
+  else verdict=`<span class="pill warn">rejected · video does not support it (${m.gap.toFixed(1)} nats vs raw) · kept raw</span>`;
+  $('#llmout').innerHTML=`<div><b>${m.corrected}</b> ${verdict} <span class="small">· ${m.model} · ${(m.latency*1000).toFixed(0)} ms</span></div>`+
+    (m.changed?`<div class="why">LLM proposed “${m.proposal}” instead of “${raw}”. ${m.reason}</div>`:`<div class="why">${m.reason}</div>`);
+  if(m.changed&&m.accepted){const bt=$('#bigtext');bt.textContent=m.corrected.toUpperCase();$('#conf').insertAdjacentHTML('beforeend',`<span class="pill ctx">context-corrected: ${wordDiff(raw,m.corrected)} · verified by the visual model</span>`);}
+  if($('#autospeak').checked)speak((m.changed&&m.accepted)?m.corrected:last.selected);  // exactly one synthesis per utterance
+}
+function wordDiff(a,b){const A=a.split(' '),B=b.split(' ');let i=0;while(i<A.length&&i<B.length&&A[i].toLowerCase()===B[i].toLowerCase())i++;let j=0;while(j<A.length-i&&j<B.length-i&&A[A.length-1-j].toLowerCase()===B[B.length-1-j].toLowerCase())j++;const x=A.slice(i,A.length-j).join(' ')||'∅',y=B.slice(i,B.length-j).join(' ')||'∅';return `“${x}” → “${y}”`;}
+function pretty(s){s=(s||'').toLowerCase().replace(/\bi\b/g,'I').replace(/\bi'/g,"I'");return s.charAt(0).toUpperCase()+s.slice(1)}
+function loadVoices(){voices.list=speechSynthesis.getVoices().filter(v=>v.lang.startsWith('en'));/* browser voices are fallback only, not listed */}
+speechSynthesis.onvoiceschanged=()=>{loadVoices();loadCloned();};loadVoices();setTimeout(loadCloned,500);
+let cloned=[];const player=new Audio();
+function speakBrowser(text){speechSynthesis.cancel();const u=new SpeechSynthesisUtterance(text);const v=voices.list.find(v=>v.name==='Samantha')||voices.list[0];if(v)u.voice=v;u.rate=1.0;speechSynthesis.speak(u);$('#err').textContent='ElevenLabs unavailable, used browser voice';}
+function speak(text,opts){if(!text)return;const sel=$('#voice').value;opts=opts||{};
+  if(sel.startsWith('clone:')){const sp=sel.slice(6);player.pause();
+    const ex=(opts.expression)||(last&&last.expression)||{emotion:'neutral',intensity:0};const tm=(last&&last.timing)||{};
+    const emo=opts.emotion||ex.emotion||'neutral',inten=opts.intensity!=null?opts.intensity:(ex.intensity||0),rate=tm.rate||1;
+    const expressive=$('#expressive').checked;
+    const url=expressive?`/api/say?text=${encodeURIComponent(text)}&emotion=${emo}&intensity=${inten}&rate=${rate}&voice=${encodeURIComponent(sp)}&utt_id=${last?last.utt_id:0}&_=${Date.now()}`
+                        :`/api/tts?text=${encodeURIComponent(text)}&voice=${encodeURIComponent(sp)}&_=${Date.now()}`;
+    player.src=url;player.onerror=()=>{speakBrowser(text);};player.play().catch(()=>speakBrowser(text));
+    if(!$('#conf').querySelector('.voicepill'))$('#conf').insertAdjacentHTML('beforeend',`<span class="pill ctx voicepill">ElevenLabs voice: ${sp}</span>`);}
+  else speakBrowser(text);}
+function loadCloned(){fetch('/api/voices').then(r=>r.json()).then(j=>{cloned=j.voices||[];const sel=$('#voice');const add=(val,label)=>{if(![...sel.options].some(o=>o.value===val)){const o=document.createElement('option');o.value=val;o.textContent=label;sel.insertBefore(o,sel.firstChild);}};(j.stock||[]).slice().reverse().forEach(v=>add('clone:'+v.name,`☁ ${v.name} (ElevenLabs)`));cloned.forEach(v=>add('clone:'+v.speaker,`🎙 ${v.speaker} (cloned)`));if(j.selected&&j.available){sel.value='clone:'+j.selected;}});}
+$('#voice').addEventListener('change',e=>{const v=e.target.value;send({cmd:'settings',voice:v.startsWith('clone:')?v.slice(6):null});});
+// listen button: hold
+const lb=$('#listen');let held=false;
+function down(e){if(held)return;held=true;lb.classList.add('on');send({cmd:'start'});e&&e.preventDefault&&e.preventDefault();}
+function up(e){if(!held)return;held=false;lb.classList.remove('on');send({cmd:'stop'});e&&e.preventDefault&&e.preventDefault();}
+lb.addEventListener('mousedown',down);lb.addEventListener('touchstart',down,{passive:false});
+window.addEventListener('mouseup',up);lb.addEventListener('touchend',up);
+window.addEventListener('keydown',e=>{if(e.code==='Space'&&!e.repeat&&!/INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName)){down(e)}});
+window.addEventListener('keyup',e=>{if(e.code==='Space'&&!/INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName)){up(e)}});
+$('#speak').onclick=()=>{if(last)speak($('#bigtext').textContent)};
+$('#clear').onclick=()=>{last=null;$('#bigtext').className='text placeholder';$('#bigtext').textContent='Hold Listen and mouth a phrase';$('#conf').innerHTML='';$('#cands').innerHTML='<div class="small">Waiting for an utterance…</div>';$('#raw').innerHTML='<span class="lbl">raw</span><span class="small">—</span>';$('#nbest').innerHTML='';$('#lat').textContent='';$('#err').textContent='';$('#llmpanel').style.display='none';};
+document.querySelectorAll('#mode button').forEach(b=>b.onclick=()=>{mode=b.dataset.mode;send({cmd:'mode',mode});document.querySelectorAll('#mode button').forEach(x=>x.classList.toggle('on',x===b));$('#clear').click();});
+$('#autospeak').onchange=e=>send({cmd:'settings',auto_speak:e.target.checked,tts:'browser'});
+$('#autolisten').onchange=e=>{send({cmd:'settings',auto_listen:e.target.checked});lb.style.opacity=e.target.checked?.45:1;lb.innerHTML=e.target.checked?'HANDS-FREE · just mouth a phrase<small>auto-detects mouth movement · or hold to force</small>':'HOLD TO LISTEN<small>or hold the space bar</small>';};
+$('#llm').onchange=e=>send({cmd:'settings',llm_enabled:e.target.checked});
+$('#expressive').onchange=e=>send({cmd:'settings',expressive:e.target.checked});
+$('#override').onchange=e=>send({cmd:'settings',emotion_override:e.target.value||null});
+let ctxT;function pushCtx(){clearTimeout(ctxT);ctxT=setTimeout(()=>send({cmd:'context',notes:$('#notes').value,category:$('#category').value,last_prompt:$('#prompt').value}),250)}
+['#notes','#prompt'].forEach(s=>$(s).addEventListener('input',pushCtx));$('#category').addEventListener('change',pushCtx);
+function applyCtx(c){if(document.activeElement!==$('#notes'))$('#notes').value=c.notes||'';if(document.activeElement!==$('#prompt'))$('#prompt').value=c.last_prompt||'';$('#category').value=c.category||'';$('#hist').innerHTML=(c.history||[]).map(h=>`<span>${h}</span>`).join('')||'<span class="small">no history yet</span>';}
+$('#save').onclick=()=>{const ph=prompt('Intended phrase for this sample:',last?last.selected:'');if(ph)send({cmd:'save_sample',phrase:ph,speaker:$('#speaker').value||'unknown'})};
+let rec=null,recChunks=[],recTimer=null;
+const CLONE_SCRIPT=["I need water. I am in pain. Please call the nurse.","The soft cushion broke the man's fall. Rice is often served in round bowls.","I did not sleep well last night, but I feel better this morning.","Can you please raise the head of the bed? The light is too bright in here.","Thank you for taking care of me today. When can I go home?","The juice of lemons makes fine punch. Four hours of steady work faced us."];
+$('#clonebtn').onclick=async()=>{
+  if(rec){rec.stop();return;}
+  const name=prompt('Your name (used to label the voice):',$('#speaker').value||'');if(!name)return;$('#speaker').value=name;
+  try{const stream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true}});
+    rec=new MediaRecorder(stream,{mimeType:'audio/webm;codecs=opus'});recChunks=[];rec.ondataavailable=e=>recChunks.push(e.data);
+    let t=0,i=0;const st=$('#clonestat');$('#clonebtn').textContent='■ Stop (≥60 s)';
+    const tick=()=>{st.innerHTML=`<b>read aloud:</b> “${CLONE_SCRIPT[i%CLONE_SCRIPT.length]}” · ${t}s`;if(t%12===11)i++;t++;};tick();recTimer=setInterval(tick,1000);
+    rec.onstop=async()=>{clearInterval(recTimer);stream.getTracks().forEach(x=>x.stop());rec=null;$('#clonebtn').textContent='🎙 Clone my voice';
+      const blob=new Blob(recChunks,{type:'audio/webm'});st.textContent=`uploading ${(blob.size/1024).toFixed(0)} KB, cloning…`;
+      const r=await fetch(`/api/voice/clone_upload?speaker=${encodeURIComponent(name)}`,{method:'POST',body:blob});const j=await r.json();
+      if(j.error){st.textContent='clone failed: '+j.error;return;}
+      st.textContent=`cloned ✓ (${j.audio_seconds}s audio) · pre-synthesizing phrase bank…`;loadCloned();setTimeout(()=>{$('#voice').value='clone:'+name;},800);};
+    rec.start(1000);
+  }catch(e){$('#clonestat').textContent='mic error: '+e;}
+};
+connect();
+</script>
+</body>
+</html>
