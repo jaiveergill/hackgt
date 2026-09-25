@@ -350,7 +350,7 @@ function speak(text,opts){if(!text)return;const sel=$('#voice').value;opts=opts|
     if(emo==='urgent'){emo='angry';inten=0.7;rate=1.1;}
     const expressive=$('#expressive').checked;
     const url=expressive?`/api/say?text=${encodeURIComponent(text)}&emotion=${emo}&intensity=${inten}&rate=${rate}&voice=${encodeURIComponent(sp)}&utt_id=${last?last.utt_id:0}&_=${Date.now()}`:`/api/tts?text=${encodeURIComponent(text)}&voice=${encodeURIComponent(sp)}&_=${Date.now()}`;
-    player.src=url;player.onerror=()=>{speakBrowser(text);};player.play().catch(()=>speakBrowser(text));
+    player.src=url;player.onerror=()=>{speakBrowser(text);};player.play().catch(e=>{if(e&&e.name==='NotAllowedError'){$('#err').textContent='Click anywhere on the page once to enable audio, then try again.';}else speakBrowser(text);});
     if(!$('#conf').querySelector('.voicepill'))$('#conf').insertAdjacentHTML('beforeend',`<span class="pill ctx voicepill">voice: ${sp}</span>`);}
   else speakBrowser(text);}
 function loadCloned(){fetch('/api/voices').then(r=>r.json()).then(j=>{cloned=j.voices||[];const sel=$('#voice');const add=(val,label)=>{if(![...sel.options].some(o=>o.value===val)){const o=document.createElement('option');o.value=val;o.textContent=label;sel.insertBefore(o,sel.firstChild);}};(j.stock||[]).slice().reverse().forEach(v=>add('clone:'+v.name,`☁ ${v.name} (ElevenLabs)`));cloned.forEach(v=>add('clone:'+v.speaker,`🎙 ${v.speaker} (my voice)`));if(j.selected&&j.available){sel.value='clone:'+j.selected;}});}
