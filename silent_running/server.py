@@ -12,7 +12,7 @@ from fastapi.staticfiles import StaticFiles
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
-from silent_running.vsr import VSREngine, load_phrases, _read_video
+from silent_running.vsr import VSREngine, load_phrases, load_phrase_table, _read_video
 from silent_running.camera_proc import CameraProcess
 from silent_running.context import ContextStore, OpenAIChooser
 from silent_running.decoder import PhraseDecoder
@@ -30,6 +30,11 @@ clients = set()
 loop = None
 engine = camera = context = phrase_decoder = llm = None
 phrases = load_phrases()
+PHRASE_TABLE = load_phrase_table()
+CRITICAL = {r["phrase"].lower() for r in PHRASE_TABLE if r["critical"]}
+CATEGORY_OF = {r["phrase"].lower(): r["category"] for r in PHRASE_TABLE}
+CRITICAL_CONF = 0.5
+LOG = []  # conversation log: [{ts, who, text, ...}]
 work_lock = threading.Lock()
 
 
@@ -103,8 +108,14 @@ def run_decode(rois, n_face, n_total, duration, source="webcam", label=None, t_c
             result["timing"] = _safe_timing(enc, pd["selected"]); LAST["timing"] = result["timing"]
             set_status("idle")
             broadcast({"type": "result", **result, "latency": {"crop": t1 - t0, "encode": t2 - t1, "phrase": t4 - t3, "total": t4 - t0}})
+            sel = pd["selected"]
+            result["category"] = CATEGORY_OF.get(sel.lower())
+            result["critical"] = sel.lower() in CRITICAL and pd["confidence"] >= CRITICAL_CONF
+            if result["critical"]:
+                broadcast({"type": "alert", "utt_id": uid, "text": sel, "confidence": pd["confidence"], "ts": time.time()})
             if pd["confidence"] >= 0.6 and gap < PHRASE_GAP_THRESHOLD:
-                context.add_history(pd["selected"])
+                context.add_history(sel)
+                _log("patient", sel, confidence=pd["confidence"], critical=result["critical"], emotion=(expression or {}).get("emotion"))
             if STATE["auto_speak"] and STATE["tts"] == "backend":
                 speak_backend(pd["selected"])
             # background: full beam n-best so the UI can show what the open-vocab decoder thought
@@ -121,6 +132,7 @@ def run_decode(rois, n_face, n_total, duration, source="webcam", label=None, t_c
             set_status("idle")
             broadcast({"type": "result", **result, "latency": {"crop": t1 - t0, "encode": t2 - t1, "beam": t4 - t3, "total": t4 - t0}})
             context.add_history(nbest[0]["text"])
+            _log("patient", _pretty(nbest[0]["text"]), confidence=probs[0], mode="open", emotion=(expression or {}).get("emotion"))
             if STATE["auto_speak"] and STATE["tts"] == "backend":
                 speak_backend(nbest[0]["text"])
             if STATE["llm_enabled"] and llm is not None:
@@ -174,6 +186,37 @@ def _word_edits(a, b):
 
 
 LAST = {"enc": None, "utt_id": 0}
+
+
+def _log(who, text, **kw):
+    rec = {"ts": time.time(), "who": who, "text": text, **kw}
+    LOG.append(rec); del LOG[:-200]
+    broadcast({"type": "log", "entry": rec})
+
+
+def nurse_listen(seconds=5.0):
+    """Record the laptop mic (the caregiver speaking), transcribe with OpenAI, and drop it into context as the nurse prompt."""
+    import tempfile
+    set_status("nurse_listening")
+    wav = tempfile.mktemp(suffix=".wav")
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "avfoundation", "-i", ":0", "-t", str(seconds), "-ar", "16000", "-ac", "1", wav])
+    set_status("idle")
+    if not os.path.exists(wav):
+        broadcast({"type": "error", "message": "microphone capture failed"}); return
+    try:
+        from openai import OpenAI
+        with open(wav, "rb") as f:
+            text = OpenAI().audio.transcriptions.create(model="gpt-4o-transcribe", file=f, language="en").text.strip()
+    except Exception as e:
+        broadcast({"type": "error", "message": f"transcription failed: {e}"}); return
+    finally:
+        try: os.remove(wav)
+        except Exception: pass
+    if not text:
+        broadcast({"type": "error", "message": "nurse: nothing heard"}); return
+    context.update(last_prompt=text)
+    _log("nurse", text)
+    broadcast({"type": "context", "context": context.snapshot()})
 
 
 def _safe_timing(enc, text):
@@ -338,7 +381,7 @@ def api_voice_clone(speaker: str):
 
 @app.get("/api/state")
 def api_state():
-    return {"state": STATE, "phrases": phrases, "context": context.snapshot(), "camera": camera.meta if camera else None,
+    return {"state": STATE, "phrases": phrases, "phrase_table": PHRASE_TABLE, "log": LOG[-50:], "context": context.snapshot(), "camera": camera.meta if camera else None,
             "engine": {"device": str(engine.device), "decode_device": str(engine.decode_device), "model": "Auto-AVSR " + os.path.basename(STATE.get("model_dir", "LRS3_V_WER19.1"))},
             "llm": {"model": llm.model if llm else None, "available": bool(llm and llm.available())}}
 
@@ -369,7 +412,7 @@ async def ws_endpoint(ws: WebSocket):
     await ws.accept()
     clients.add(ws)
     try:
-        await ws.send_text(json.dumps({"type": "hello", "state": STATE, "phrases": phrases, "context": context.snapshot()}))
+        await ws.send_text(json.dumps({"type": "hello", "state": STATE, "phrases": phrases, "phrase_table": PHRASE_TABLE, "context": context.snapshot(), "log": LOG[-30:]}))
         while True:
             msg = json.loads(await ws.receive_text())
             cmd = msg.get("cmd")
@@ -397,6 +440,12 @@ async def ws_endpoint(ws: WebSocket):
                 broadcast({"type": "context", "context": context.snapshot()})
             elif cmd == "speak":
                 speak_backend(msg.get("text", ""))
+            elif cmd == "nurse":
+                threading.Thread(target=nurse_listen, args=(float(msg.get("seconds", 5)),), daemon=True).start()
+            elif cmd == "nurse_text":
+                t = (msg.get("text") or "").strip()
+                if t:
+                    context.update(last_prompt=t); _log("nurse", t); broadcast({"type": "context", "context": context.snapshot()})
             elif cmd == "confirm":  # user/nurse confirmed a phrase (adds to history)
                 context.add_history(msg.get("text", ""))
                 broadcast({"type": "context", "context": context.snapshot()})

@@ -5,15 +5,13 @@ supports; it never introduces phrases. Every adjustment is returned so the UI ca
 """
 import os, json, time, re, threading
 
-CATEGORIES = {
-    "pain": ["I am in pain", "My chest hurts", "My head hurts", "I need medication"],
-    "breathing": ["I can't breathe", "Please suction"],
-    "comfort": ["I am cold", "I am hot", "Turn me over", "I want to sit up", "I want to lie down", "Please turn off the light", "Please turn on the TV"],
-    "people": ["Call my family", "I need the nurse", "Please call the doctor", "I need help"],
-    "needs": ["I need water", "I need to use the bathroom", "I am hungry", "I need my glasses"],
-    "answers": ["Yes", "No", "Thank you"],
-    "status": ["I feel sick", "I feel dizzy", "I am scared", "I am tired", "Where am I", "What time is it"],
-}
+def _load_categories():
+    from silent_running.vsr import load_phrase_table
+    cats = {}
+    for r in load_phrase_table():
+        cats.setdefault(r["category"], []).append(r["phrase"])
+    return cats
+CATEGORIES = _load_categories()
 PHRASE_CATEGORY = {p.lower(): c for c, ps in CATEGORIES.items() for p in ps}
 STOP = set("i am a the to my me is it of and please need want".split())
 
