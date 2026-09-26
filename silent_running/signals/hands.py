@@ -1,20 +1,31 @@
 """Hand signals -> finger count 1-10, thumbs up/down, pointing, from the MediaPipe Hand Landmarker (Apache-2.0).
 
 Runs inside the camera process. One landmarker pass per frame gives up to two hands with 21 landmarks each (image +
-metric 3D "world" coordinates). With one hand we classify one pose:
-  - thumb up / down: only the thumb straight and it points up or down
+metric 3D "world" coordinates). Each hand is first classified on its own:
+  - thumb up / down: only the thumb straight, clearly (its own clarity is 1, see MARGIN), pointing up or down;
+    a lone thumb held sideways gives no label (it is a tilted thumbs up/down, and would otherwise read as "1")
   - point: only the index finger straight and it points sideways or down (index straight up = counting 1)
   - count: number of straight fingers
-With two hands both are counted and summed (5 + thumb = 6). A count of 0 is never reported: a fist looks the same as a
-resting hand, and a false "0" answer to a pain question is the harmful error.
+A hand hanging down (wrist above the knuckles) is resting, not signalling, and is ignored: on HaGRID dev full frames 84%
+of the resting second hands hang, no gesturing hand does, and a hanging relaxed hand otherwise reads as "thumb down".
+A hand showing 0 (fist) is ignored too. If two hands remain, both are counted and summed (5 + thumb = 6); otherwise
+the one remaining hand gives the label. So a thumbs-up next to a resting fist stays "thumb up", and a lone fist gives no
+signal at all: a fist looks the same as a resting hand, and a false "0" answer to a pain question is the harmful error.
 A finger is straight when its tip reaches well beyond its middle joint, measured on the metric world landmarks, so counting
-does not depend on how the hand is rotated relative to the (head-mounted, moving) camera. Directions (thumb, point) are
-measured relative to the patient's eye line when a face is tracked (image axes otherwise), so a tilted head or camera
-does not turn "up" into "left". Thresholds were chosen on the HaGRID dev split (scripts/eval_hands.py); test is held out.
-Per-frame confidence is how clearly every finger is straight or bent (1 = all far from the threshold).
+does not depend on how the hand is rotated relative to the (head-mounted, moving) camera. Directions (thumb, point,
+hanging) are measured on image axes: a thumbs-up points against gravity, and the head-mounted camera is upright while
+the wearer's head is, whereas the patient's own head may lie at any roll (turned on their side every 2 h in the ICU), so
+the patient's eye line is not a reference for "up". On HaGRID dev full photos, eye-line roll compensation (the first
+version of this module) got no more thumbs right at +-20 deg camera roll (31 vs 35 of 74 without it) and only helped at
++-40 deg (35 vs 14 of 74); results/hands_hagrid_test_rot*.md has the test numbers. Counting is unaffected by roll.
+Thresholds were chosen on the HaGRID dev split (scripts/eval_hands.py); test is held out.
+Confidence (per frame, and the same number on live signals and in the utterance summary) is how clearly every finger is
+straight or bent: 1 = all at least MARGIN from the threshold. It is calibrated on HaGRID full frames (see eval_hands.py).
 Per frame the hands give one label ("fingers", n) / ("thumb", "up") / ("point", "left") / None. A label becomes a live
 signal once it has been held for HOLD seconds; the utterance summary is, per kind, the held label seen on the most frames
 inside a time window (the same "held" rule as the live signal, so the two never disagree).
+Left/right are from the patient's side, assuming an unmirrored camera image (webcam, glasses camera and file sources all
+deliver raw frames); a clip recorded mirrored (e.g. Photo Booth) swaps them.
 """
 import os, collections
 import numpy as np
@@ -25,7 +36,8 @@ FINGERS = {"index": (5, 6, 7, 8), "middle": (9, 10, 11, 12), "ring": (13, 14, 15
 FINGER_OUT = 1.2         # straight finger: tip at least this much farther from the wrist than its middle joint (PIP) is
 THUMB_OUT = 1.1          # straight thumb: tip at least this much farther from the pinky knuckle than the thumb knuckle is
 MIN_DETECTION, MIN_PRESENCE = 0.7, 0.8  # MediaPipe defaults (0.5) hallucinate hands on shirts/necklines in TED clips
-MARGIN = 0.15            # relative distance from a finger threshold that counts as fully clear (confidence 1)
+MARGIN = 0.15            # relative distance from a finger threshold that counts as fully clear (confidence 1); a
+                         # lone thumb must be this clear: on HaGRID dev (6 views) it cuts fist -> thumb from 10% to 1%
 HOLD = 0.5               # seconds a label must be held before it becomes a live signal
 AGREE = 0.8              # fraction of frames in the hold window that must agree
 
@@ -38,42 +50,51 @@ def finger_ratios(w):
     return out
 
 
-def finger_direction(img_lm, base, tip, aspect, roll):
-    """Direction base -> tip from the patient's side (the camera faces the patient, so the patient's left is image right).
-    img_lm: 21x2 normalised landmarks; aspect = width / height; roll: angle of the patient's eye line in the image (radians)."""
+def finger_direction(img_lm, base, tip, aspect):
+    """Direction base -> tip on image axes, from the patient's side (the camera faces the patient, so the patient's left is
+    image right). img_lm: 21x2 normalised landmarks; aspect = width / height."""
     d = (img_lm[tip] - img_lm[base]) * np.array([aspect, 1.0])
-    c, s = np.cos(-roll), np.sin(-roll)
-    d = np.array([c * d[0] - s * d[1], s * d[0] + c * d[1]])
     if abs(d[1]) >= abs(d[0]):
         return "up" if d[1] < 0 else "down"
     return "left" if d[0] > 0 else "right"
 
 
-def hand_pose(world, img_lm, aspect, roll, count_only):
-    """-> (kind, value, confidence) for one hand: ("thumb", "up"|"down") | ("point", direction) | ("fingers", n).
-    count_only: always count (used when two hands are shown)."""
+def straight_fingers(world):
+    """-> (set of straight fingers, confidence). A lone thumb counts only when clearly straight (its own clarity is 1):
+    just past the threshold is how a fist often reads."""
     r = finger_ratios(world)
-    conf = float(min(np.clip(abs(v - 1.0) / MARGIN, 0.0, 1.0) for v in r.values()))
+    clarity = {k: float(np.clip(abs(v - 1.0) / MARGIN, 0.0, 1.0)) for k, v in r.items()}
     straight = {k for k, v in r.items() if v > 1.0}
-    if not count_only and straight == {"thumb"}:
-        direction = finger_direction(img_lm, 2, 4, aspect, roll)
-        if direction in ("up", "down"):
-            return "thumb", direction, conf
-    if not count_only and straight == {"index"}:
-        direction = finger_direction(img_lm, 5, 8, aspect, roll)
+    if straight == {"thumb"} and clarity["thumb"] < 1.0:
+        straight = set()
+    return straight, min(clarity.values())
+
+
+def hand_pose(world, img_lm, aspect):
+    """-> (kind, value, confidence) for one hand shown on its own: ("thumb", "up"|"down") | ("point", direction) |
+    ("fingers", n >= 1), or None for a fist or a lone thumb held sideways (a tilted thumbs up/down, not a count)."""
+    straight, conf = straight_fingers(world)
+    if straight == {"thumb"}:
+        direction = finger_direction(img_lm, 2, 4, aspect)
+        return ("thumb", direction, conf) if direction in ("up", "down") else None
+    if straight == {"index"}:
+        direction = finger_direction(img_lm, 5, 8, aspect)
         if direction != "up":
             return "point", direction, conf
-    return "fingers", len(straight), conf
+    return ("fingers", len(straight), conf) if straight else None
 
 
-def frame_label(hands, aspect, roll):
-    """hands: list of (world 21x3, img 21x2) -> (kind, value, confidence) or None. Two hands are counted and summed."""
-    poses = [hand_pose(w, i, aspect, roll, len(hands) > 1) for w, i in hands]
-    if len(poses) > 1:
-        poses = [("fingers", sum(p[1] for p in poses), min(p[2] for p in poses))]
-    if not poses or poses[0][:2] == ("fingers", 0):
-        return None
-    return poses[0]
+def frame_label(hands, aspect):
+    """hands: list of (world 21x3, img 21x2) -> (kind, value, confidence) or None. Hanging hands and fists are ignored;
+    two remaining hands are counted and summed (5 + thumb = 6)."""
+    shown = []
+    for w, i in hands:
+        straight, conf = straight_fingers(w)
+        if straight and finger_direction(i, 0, 9, aspect) != "down":
+            shown.append((w, i, len(straight), conf))
+    if len(shown) == 2:
+        return "fingers", shown[0][2] + shown[1][2], min(shown[0][3], shown[1][3])
+    return hand_pose(shown[0][0], shown[0][1], aspect) if shown else None
 
 
 def hands_from_result(res):
@@ -82,16 +103,20 @@ def hands_from_result(res):
             for i, lms in enumerate(res.hand_landmarks)]
 
 
+def landmarker(video, model_path=MODEL):
+    """The MediaPipe Hand Landmarker with the live settings; video=False (IMAGE mode, no tracking) is for the stills eval."""
+    from mediapipe.tasks import python as mpp
+    from mediapipe.tasks.python import vision
+    return vision.HandLandmarker.create_from_options(vision.HandLandmarkerOptions(
+        base_options=mpp.BaseOptions(model_asset_path=model_path),
+        running_mode=vision.RunningMode.VIDEO if video else vision.RunningMode.IMAGE, num_hands=2,
+        min_hand_detection_confidence=MIN_DETECTION, min_hand_presence_confidence=MIN_PRESENCE, min_tracking_confidence=0.5))
+
+
 class HandTracker:
     def __init__(self, model_path=MODEL, history_seconds=20.0):
         import mediapipe as mp
-        from mediapipe.tasks import python as mpp
-        from mediapipe.tasks.python import vision
-        opts = vision.HandLandmarkerOptions(base_options=mpp.BaseOptions(model_asset_path=model_path),
-                                            running_mode=vision.RunningMode.VIDEO, num_hands=2,
-                                            min_hand_detection_confidence=MIN_DETECTION, min_hand_presence_confidence=MIN_PRESENCE,
-                                            min_tracking_confidence=0.5)
-        self.rec = vision.HandLandmarker.create_from_options(opts)
+        self.rec = landmarker(True, model_path)
         self.mp = mp
         self.t0 = None
         self.t_ms = -1
@@ -105,12 +130,11 @@ class HandTracker:
         self.t_ms = max(int((ts - self.t0) * 1000), self.t_ms + 1)  # VIDEO mode needs strictly increasing timestamps
         return hands_from_result(self.rec.detect_for_video(self.mp.Image(image_format=self.mp.ImageFormat.SRGB, data=rgb), self.t_ms))
 
-    def update(self, rgb, ts, roll):
-        """Process one frame (roll: the patient's eye-line angle, 0 if no face). Returns a live signal dict when a newly
-        held pose is recognised, else None."""
+    def update(self, rgb, ts):
+        """Process one frame. Returns a live signal dict when a newly held pose is recognised, else None."""
         hands = self.detect(rgb, ts)
         self.last_hands = [h[1] for h in hands]
-        self.recent.append((ts, frame_label(hands, rgb.shape[1] / rgb.shape[0], roll)))
+        self.recent.append((ts, frame_label(hands, rgb.shape[1] / rgb.shape[0])))
         full = self.recent[0][0] <= ts - HOLD * 0.8  # the window spans (almost) HOLD seconds
         while self.recent[0][0] < ts - HOLD:
             self.recent.popleft()
@@ -118,11 +142,10 @@ class HandTracker:
             return None
         keys = [(lab[0], lab[1]) if lab else None for _, lab in self.recent]
         top, n = collections.Counter(keys).most_common(1)[0]
-        agree = n / len(keys)
-        if agree < AGREE:
+        if n / len(keys) < AGREE:
             return None
         if top is not None:
-            conf = float(np.mean([lab[2] for _, lab in self.recent if lab and (lab[0], lab[1]) == top])) * agree
+            conf = float(np.mean([lab[2] for _, lab in self.recent if lab and (lab[0], lab[1]) == top]))
             self.held.append((ts, (top[0], top[1], conf)))
         if top == self.emitted:
             return None
@@ -131,7 +154,7 @@ class HandTracker:
 
     def summary(self, start, end):
         """-> {"fingers": {...}, "thumb": {...}, "point": {...}}: per kind, the held value seen on the most frames in
-        [start, end] with its mean live confidence (value None if nothing was held)."""
+        [start, end] with its mean per-frame confidence (value None if nothing was held)."""
         held = [h for t, h in self.held if start <= t <= end]
         out = {k: {"value": None, "confidence": 0.0} for k in ("fingers", "thumb", "point")}
         for kind in out:
