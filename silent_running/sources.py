@@ -7,7 +7,10 @@ Spec strings (server `--source`):
   usb               first USB (UVC) camera per system_profiler (never the FaceTime or an iPhone Continuity Camera)
   usb:1 | usb:Arducam   by index or by (substring of) the AVFoundation device name; preview not mirrored
   file:data/eval/x.mp4[?loop=0&realtime=0&gap=0]   plays at native fps, loops by default (judging backup); see FileSource
-  stream:http://172.20.10.2:81/stream   MJPEG over HTTP (ESP32-CAM on the glasses); stream:172.20.10.2 = that host's :81/stream
+  stream:http://172.20.10.2:81/stream[?framesize=9&quality=16]   MJPEG over HTTP (ESP32-CAM on the glasses);
+                    stream:172.20.10.2 = that host's :81/stream with framesize=9 (HVGA) and quality=16 applied on every (re)open
+                    via the board's /control endpoint. HVGA q16 ~19 fps without dropouts on a phone hotspot; q10 saturated the
+                    link (0.5-1 s gaps, 480 ms ping spikes); VGA runs at 6 fps on this board.
 """
 import json, math, os, re, sys, time, subprocess
 
@@ -261,18 +264,40 @@ class StreamSource(VideoSource):
     kind = "stream"
     mirror = False
 
+    DEFAULT_SETTINGS = {"framesize": 9, "quality": 16}
+
     def __init__(self, url, timeout=5.0):
+        url, _, query = url.partition("?")
         if not url.startswith("http"):
             url = f"http://{url}:81/stream"
+        self.settings = dict(self.DEFAULT_SETTINGS) if not url.startswith("http") or ":81/stream" in url else {}
+        for kv in query.split("&"):
+            if "=" in kv:
+                k, v = kv.split("=", 1); self.settings[k] = v
         self.url, self.timeout = url, timeout
         self._frame, self._ts, self._seq, self._got = None, 0.0, 0, 0
         self._stop, self._thread, self._err = False, None, None
         self.width = self.height = 0
         self.fps_est = 0.0
 
+    def _configure(self):
+        """ESP32-CAM: push frame size / JPEG quality through /control on the board's :80 server (they reset on reboot)."""
+        import urllib.request, urllib.parse
+        if not self.settings:
+            return
+        u = urllib.parse.urlsplit(self.url)
+        base = f"{u.scheme}://{u.hostname}"
+        for k, v in self.settings.items():
+            try:
+                urllib.request.urlopen(f"{base}/control?var={k}&val={v}", timeout=3).read()
+            except Exception as e:
+                print(f"[source] could not set {k}={v} on {base}: {e}")
+        time.sleep(0.3)
+
     def open(self):
         import urllib.request
         self._stop = False
+        self._configure()
         req = urllib.request.Request(self.url, headers={"User-Agent": "silent-running"})
         try:
             resp = urllib.request.urlopen(req, timeout=self.timeout)
@@ -343,7 +368,7 @@ class StreamSource(VideoSource):
         self.open()
 
     def info(self):
-        return {**super().info(), "url": self.url, "fps": round(self.fps_est, 1), "width": self.width, "height": self.height}
+        return {**super().info(), "url": self.url, "fps": round(self.fps_est, 1), "width": self.width, "height": self.height, "settings": self.settings}
 
 
 def _flag(v):
