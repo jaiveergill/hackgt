@@ -4,11 +4,13 @@
 
 Serves silent_running/ on a free port, opens /static/index.html?demo=1 in headless Chrome driven over the DevTools
 protocol, and waits (real time) for each expected UI state in order: hero state / text / source badge, nonverbal chips,
-the critical alert, then a manual space-bar take. Prints expected vs actual per step and any page JS exceptions.
+the critical alert, then a manual space-bar take. Then, with the scenes paused: a 40-message conversation at 1920x1080 and
+1280x720 (the page must not grow and the newest message must be in view), an injection fuzz over every string field the
+UI renders, and speak(): the face emotion for non-lip text, and a superseded playback not falling back to the browser voice.
+Prints expected vs actual per step and any page JS exceptions.
 Exit code 0 = every step reached and no exceptions.
 """
 import argparse, glob, json, os, shutil, socket, subprocess, sys, tempfile, threading, time, urllib.request
-from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from websockets.sync.client import connect
 
@@ -42,10 +44,16 @@ def find_chrome(arg):
     sys.exit("no Chrome/Chromium found; pass --chrome or set CHROME")
 
 
+class QuietHandler(SimpleHTTPRequestHandler):
+    def __init__(self, *a, **kw):
+        super().__init__(*a, directory=os.path.join(ROOT, "silent_running"), **kw)
+
+    def log_message(self, *a):
+        pass
+
+
 def serve():
-    handler = partial(SimpleHTTPRequestHandler, directory=os.path.join(ROOT, "silent_running"))
-    handler.log_message = lambda *a: None
-    httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), QuietHandler)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     return f"http://127.0.0.1:{httpd.server_address[1]}/static/index.html?demo=1"
 
@@ -55,7 +63,7 @@ class Page:
     def __init__(self, chrome):
         self.profile = tempfile.mkdtemp(prefix="sr_ui_check_")
         s = socket.socket(); s.bind(("127.0.0.1", 0)); port = s.getsockname()[1]; s.close()
-        self.proc = subprocess.Popen([chrome, "--headless=new", "--disable-gpu", "--no-first-run", "--mute-audio", "--window-size=1920,1080",
+        self.proc = subprocess.Popen([chrome, "--headless=new", "--disable-gpu", "--no-first-run", "--mute-audio", "--autoplay-policy=no-user-gesture-required", "--window-size=1920,1080",
                                       f"--remote-debugging-port={port}", f"--user-data-dir={self.profile}", "about:blank"],
                                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         pages, t_end = [], time.time() + 60  # Chrome can take >10 s to start on a loaded machine; the port opens before the tab exists
@@ -84,13 +92,53 @@ class Page:
                 return m.get("result", {})
 
     def eval(self, js):
-        return self.call("Runtime.evaluate", expression=js, returnByValue=True)["result"].get("value")
+        return self.call("Runtime.evaluate", expression=js, returnByValue=True, awaitPromise=True)["result"].get("value")
 
     def key(self, kind, code=" "):
         self.call("Input.dispatchKeyEvent", type=kind, key=code, code="Space", windowsVirtualKeyCode=32, text=code if kind == "keyDown" else "")
 
     def close(self):
         self.ws.close(); self.proc.terminate(); self.proc.wait(); shutil.rmtree(self.profile, ignore_errors=True)
+
+
+# Long conversation: the page must stay at the viewport height, the log scrolls inside its panel, newest message in view.
+LONG_LOG_JS = """(()=>{for(let i=1;i<=40;i++)handle({type:'log',entry:{ts:Date.now()/1000,who:i%2?'nurse':'patient',text:'message '+i}});
+  return new Promise(r=>setTimeout(()=>{const m=document.querySelector('main'),S=document.querySelector('#logscroll'),s=S.getBoundingClientRect(),
+  n=document.querySelector('#log').lastElementChild.getBoundingClientRect();
+  r({page_fits:m.scrollHeight<=m.clientHeight,log_scrolls:S.scrollHeight>S.clientHeight,newest_in_view:n.top>=s.top-1&&n.bottom<=s.bottom+1})},600))})()"""
+LONG_LOG_EXP = {"page_fits": True, "log_scrolls": True, "newest_in_view": True}
+
+# Every string field of every event the UI renders carries an HTML payload; none may become markup.
+FUZZ_JS = """(()=>{const P='<img src=x onerror="window.__xss=(window.__xss||0)+1">',u=900,lat={crop:.1,encode:.1,phrase:.1,total:.3};
+  const tm={duration:1,rate:1,pauses:[],words:[{word:P,start:0,end:.5}]},ex={emotion:P,intensity:.5,scores:{[P]:.5}};
+  const nv={head:{value:P,confidence:.9},fingers:{value:P,confidence:.9},blink_code:{value:P,confidence:.9},pain:{value:.5,confidence:.9},emotion:{label:P,intensity:.5}};
+  [{type:'raw',utt_id:u,text:P,n_frames:10,duration:1,latency:lat},
+   {type:'result',utt_id:u,mode:'open',selected:P,confidence:.5,nbest:[{text:P,score:1,prob:.5}],n_frames:10,duration:1,expression:ex,timing:tm,latency:lat,nonverbal:nv},
+   {type:'llm',utt_id:u,changed:true,accepted:true,corrected:P,proposal:P,reason:P,model:P,gap:1,latency:.3},{type:'nbest',utt_id:u,nbest:[{text:P,score:1,prob:.5}]},
+   {type:'result',utt_id:u+1,mode:'phrase',selected:P,confidence:.5,visual_top:P,context_changed_choice:true,category:P,in_inventory:false,phrase_gap:1,
+    ranking:[{phrase:P,vsr_prob:.5,final_prob:.5,prior:1,reasons:[P],vsr_score:-1,att:-1,ctc:-1}],n_frames:10,duration:1,expression:ex,timing:tm,latency:lat,nonverbal:nv},
+   {type:'delivery',utt_id:u+1,emotion:P,intensity:.5,model:P,tag:P,stability:P,rate:1,cached:false,t_synth:P,total:P,retime:{applied:true,global:P,audio_words:[{word:P,start:0,end:.5}],ratios:[1]}},
+   {type:'decision',utt_id:u+1,text:P,confidence:.5,source:P,reason:P,provider:P,alternatives:[{text:P,confidence:.2}],action:P},
+   {type:'confirm',utt_id:u+1,candidate:P,attempt:P,state:'asking'},{type:'confirm',utt_id:u+1,candidate:P,attempt:P,state:'rejected'},
+   ...['blink_code','fingers','thumb','point'].map(kind=>({type:'signal',kind,value:P,confidence:.9,ts:0})),
+   {type:'log',entry:{ts:0,who:P,text:P,confidence:.5,source:P,emotion:P}},{type:'context',context:{notes:P,category:P,last_prompt:P,history:[P]}},
+   {type:'alert',utt_id:u+1,text:P},{type:'error',message:P},{type:'saved',file:P,phrase:P},{type:'prewarmed',speaker:P,n:P}].forEach(handle);
+  document.querySelector('#alertok').click();
+  return new Promise(r=>setTimeout(()=>r({xss_fired:window.__xss||0,injected_imgs:document.querySelectorAll('img:not(#cam)').length}),800))})()"""
+FUZZ_EXP = {"xss_fired": 0, "injected_imgs": 0}
+
+# speak() with an ElevenLabs voice selected (the static server 404s /api/say, so a source failure is exercised too).
+SPEAK_JS = """(()=>{const s=document.querySelector('#voice'),o=document.createElement('option');o.value='clone:T';s.appendChild(o);s.value='clone:T';
+  const spoken=[],sp=speechSynthesis.speak.bind(speechSynthesis);speechSynthesis.speak=x=>{spoken.push(x.text);sp(x)};
+  handle({type:'result',utt_id:7,mode:'phrase',selected:'I am cold',confidence:.8,visual_top:'I am cold',in_inventory:true,n_frames:40,duration:1.6,latency:{crop:.05,encode:.1,phrase:.2,total:.35},
+    ranking:['I am cold','I am hot'].map((phrase,i)=>({phrase,vsr_prob:.8-i*.6,final_prob:.8-i*.6,prior:0,reasons:[],vsr_score:-1,att:-1,ctc:-1})),
+    expression:{emotion:'sad',intensity:.8},timing:{duration:1.6,rate:1.3,pauses:[],words:[]}});
+  const q=()=>{const u=new URL(player.src).searchParams;return ['emotion','intensity','rate','utt_id'].map(k=>k+'='+u.get(k)).join('&')};
+  const r={};speak('I am cold',{utt_id:7});r.lip_phrase=q();speak('I am freezing',{utt_id:7});r.llm_text=q();
+  document.querySelectorAll('#dym button')[1].click();r.candidate_tap=q();
+  return new Promise(res=>setTimeout(()=>{spoken.length=0;speak('FIRST');speak('SECOND');setTimeout(()=>{r.browser_fallback=spoken;res(r)},1500)},800))})()"""
+SPEAK_EXP = {"lip_phrase": "emotion=sad&intensity=0.8&rate=1.3&utt_id=7", "llm_text": "emotion=sad&intensity=0.8&rate=1&utt_id=0",
+             "candidate_tap": "emotion=sad&intensity=0.8&rate=1&utt_id=0", "browser_fallback": ["SECOND"]}
 
 
 def wait_for(page, exp, timeout):
@@ -125,11 +173,23 @@ def main():
         ok, got = wait_for(page, exp, timeout=5)
         fails += not ok
         print(f"{'PASS' if ok else 'FAIL'} {time.time() - t0:5.1f}s {name}\n      expected {exp}" + ("" if ok else f"\n      actual   {got}"))
+        page.eval("document.querySelector('#dplay').click()")  # pause the scenes: the rest injects events directly
+        checks = []
+        for w, h in ((1920, 1080), (1280, 720)):
+            page.call("Emulation.setDeviceMetricsOverride", width=w, height=h, deviceScaleFactor=1, mobile=False)
+            page.eval("document.querySelector('#log').innerHTML=''")
+            checks.append((f"long conversation (40 messages) at {w}x{h}", LONG_LOG_EXP, page.eval(LONG_LOG_JS)))
+        checks.append(("HTML payload in every rendered string field", FUZZ_EXP, page.eval(FUZZ_JS)))
+        checks.append(("speak(): face emotion for non-lip text, no fallback for a superseded playback", SPEAK_EXP, page.eval(SPEAK_JS)))
+        for name, exp, got in checks:
+            ok = got == exp
+            fails += not ok
+            print(f"{'PASS' if ok else 'FAIL'} {time.time() - t0:5.1f}s {name}\n      expected {exp}\n      actual   {got}")
     finally:
         exc = list(page.exceptions)
         page.close()
     print(f"page JS exceptions: {exc or 'none'}")
-    n = len(STEPS) + 1
+    n = len(STEPS) + 1 + 4
     print(f"{n - fails}/{n} steps reached")
     sys.exit(1 if fails or exc else 0)
 

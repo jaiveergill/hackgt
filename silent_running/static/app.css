@@ -19,6 +19,7 @@ header .sub{color:var(--muted);font-size:12px}
 .statuspill.listening{color:var(--fused);border-color:rgba(90,169,255,.5)}.statuspill.listening i{background:var(--fused);animation:pulse 1s infinite}
 .statuspill.processing{color:var(--confirm);border-color:rgba(255,181,71,.5)}.statuspill.processing i{background:var(--confirm);animation:pulse 1s infinite}
 .statuspill.nurse_listening{color:var(--confirm)}.statuspill.nurse_listening i{background:var(--confirm);animation:pulse 1s infinite}
+.statuspill.offline{color:var(--bad);border-color:rgba(255,84,104,.5)}.statuspill.offline i{background:var(--bad)}
 .toggle{display:flex;background:var(--panel2);border:1px solid var(--line);border-radius:10px;overflow:hidden}
 .toggle button{background:transparent;border:0;color:var(--muted);padding:8px 14px;font:600 13px Inter;cursor:pointer}
 .toggle button.on{background:var(--fused);color:#04101f}
@@ -26,7 +27,7 @@ header .sub{color:var(--muted);font-size:12px}
 main{min-height:0;overflow:auto}
 .tab{display:none;padding:18px;gap:18px;min-height:0}
 .tab.on{display:grid}
-#tab-patient{grid-template-columns:minmax(360px,36%) 1fr;min-height:100%}
+#tab-patient{grid-template-columns:minmax(360px,36%) 1fr;grid-template-rows:minmax(0,1fr);height:100%}  /* bounded, so the log scrolls inside its panel */
 #tab-dev{grid-template-columns:minmax(360px,40%) 1fr}
 .col{display:flex;flex-direction:column;gap:14px;min-height:0;min-width:0}
 .panel{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);padding:14px 16px;flex-shrink:0;min-width:0}
@@ -42,7 +43,7 @@ details[open] summary{margin-bottom:10px}
 @keyframes pulse{0%{box-shadow:0 0 0 0 currentColor}100%{box-shadow:0 0 0 10px transparent}}
 
 /* ---------- camera */
-.cam{position:relative;background:#000;border-radius:var(--r);overflow:hidden;border:1px solid var(--line);aspect-ratio:4/3;max-height:46vh;flex-shrink:0}
+.cam{position:relative;background:#000;border-radius:var(--r);overflow:hidden;border:1px solid var(--line);aspect-ratio:4/3;max-height:46vh;min-height:140px}  /* shrinks first when the column is short */
 .cam img,.cam canvas{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;display:block}
 .cam canvas{display:none}
 .cam.demo img{display:none}.cam.demo canvas{display:block}
@@ -56,7 +57,7 @@ details[open] summary{margin-bottom:10px}
 .dot.ok{background:var(--lips)}
 .dot.rec{background:var(--fused);color:var(--fused);animation:pulse 1s infinite}
 .state{position:absolute;right:12px;top:12px;background:rgba(0,0,0,.55);padding:6px 10px;border-radius:8px;font:700 11px Inter;letter-spacing:1.4px;text-transform:uppercase}
-.state.listening{color:var(--fused)}.state.processing{color:var(--confirm)}.state.idle{color:var(--muted)}.state.nurse_listening{color:var(--confirm)}
+.state.listening{color:var(--fused)}.state.processing{color:var(--confirm)}.state.idle{color:var(--muted)}.state.nurse_listening{color:var(--confirm)}.state.offline{color:var(--bad)}
 .hint{position:absolute;left:0;right:0;bottom:0;padding:10px 12px;background:linear-gradient(transparent,rgba(0,0,0,.8));font-size:12px;color:#cfd9e4}
 .meter{gap:6px;font:500 10px var(--mono);color:var(--muted)}
 .meter b{display:inline-block;width:40px;height:5px;background:rgba(255,255,255,.1);border-radius:3px;overflow:hidden;vertical-align:middle}
@@ -65,7 +66,7 @@ details[open] summary{margin-bottom:10px}
 /* ---------- nonverbal chips */
 .signals{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;flex-shrink:0}
 .sig{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:8px 10px;transition:border-color .3s,background .3s,opacity .6s;min-width:0}
-.sig label{display:block;font:700 9.5px Inter;letter-spacing:1.4px;text-transform:uppercase;color:var(--dim)}
+.sig label{display:block;font:700 11px Inter;letter-spacing:1.4px;text-transform:uppercase;color:var(--dim)}
 .sig label em{font-style:normal;color:var(--muted);letter-spacing:0;margin-left:4px}
 .sig .v{display:flex;align-items:center;gap:6px;font:700 18px Inter;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--muted)}
 .sig .v small{font:500 11px var(--mono);color:var(--muted)}
@@ -106,7 +107,7 @@ input.txt:focus,.ctxform input:focus,.ctxform textarea:focus{outline:none;border
 .micicon{width:12px;height:12px;border-radius:50%;background:var(--fused)}
 .mic.on .micicon{background:#7a0010;animation:pulse 1s infinite;color:#7a0010}
 .asked{flex:1;min-width:0}
-.asked label{display:block;font:700 9.5px Inter;letter-spacing:1.4px;text-transform:uppercase;color:var(--dim)}
+.asked label{display:block;font:700 11px Inter;letter-spacing:1.4px;text-transform:uppercase;color:var(--dim)}
 .asked .q{font:600 20px Inter;color:var(--fused);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .asked .q.empty{color:var(--dim);font-weight:500;font-size:16px}
 .asked .q.fresh{animation:qin .6s ease-out}
@@ -121,6 +122,7 @@ input.txt:focus,.ctxform input:focus,.ctxform textarea:focus{outline:none;border
 .hero[data-state="confirm"]{--c:var(--confirm);border-color:rgba(255,181,71,.55);box-shadow:0 0 50px rgba(255,181,71,.12)}
 .hero[data-state="confirmed"]{--c:var(--ok);border-color:rgba(61,220,151,.55)}
 .hero[data-state="processing"] .text{opacity:.35}
+.hero.weak .text{opacity:.55}
 .ring{position:relative;width:150px;height:150px;flex-shrink:0}
 .ring svg{width:100%;height:100%;transform:rotate(-90deg)}
 .ring circle{fill:none}
@@ -129,7 +131,7 @@ input.txt:focus,.ctxform input:focus,.ctxform textarea:focus{outline:none;border
 .ring .cd{stroke:var(--confirm);stroke-width:3;stroke-dasharray:276.5;stroke-dashoffset:276.5;opacity:0}
 .hero[data-state="confirm"] .ring .cd{opacity:.8}
 .ring .pct{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font:800 36px Inter;letter-spacing:-1px}
-.ring .ringlbl{position:absolute;left:0;right:0;bottom:36px;text-align:center;font:700 8.5px Inter;letter-spacing:1.5px;text-transform:uppercase;color:var(--dim)}
+.ring .ringlbl{position:absolute;left:0;right:0;bottom:34px;text-align:center;font:700 10px Inter;letter-spacing:1.5px;text-transform:uppercase;color:var(--dim)}
 .hero[data-state="processing"] .ring .arc{stroke-dasharray:60 267;stroke-dashoffset:0;animation:spin 1s linear infinite;transition:none}
 @keyframes spin{to{stroke-dashoffset:-326.7}}
 .herobody{flex:1;min-width:0;position:relative}
@@ -164,12 +166,14 @@ input.txt:focus,.ctxform input:focus,.ctxform textarea:focus{outline:none;border
 .alts span{color:var(--muted)}
 
 /* ---------- conversation + candidates */
-.grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px;min-height:240px;flex:1}
+.grid2{display:grid;grid-template-columns:1fr 1fr;grid-template-rows:minmax(0,1fr);gap:14px;min-height:240px;flex:1 1 0}
 .grid2 .panel{display:flex;flex-direction:column;min-height:0;overflow:hidden}
-.log{display:flex;flex-direction:column;gap:8px;overflow:auto;flex:1;min-height:0;padding-right:4px}
+/* reversed scroll container: its scroll origin is the bottom, so the newest message stays in view when the panel shrinks or fonts load */
+.logscroll{display:flex;flex-direction:column-reverse;overflow:auto;flex:1;min-height:0;padding-right:4px}
+.log{display:flex;flex-direction:column;gap:8px;margin-bottom:auto}
 .msg{display:flex;flex-direction:column;max-width:88%;flex-shrink:0;animation:qin .35s ease-out}
 .msg .t{border-radius:14px;padding:8px 12px;font-size:16px;line-height:1.3;background:var(--panel2);border:1px solid var(--line)}
-.msg .meta{font:500 10px var(--mono);color:var(--dim);margin:3px 6px 0}
+.msg .meta{font:500 12px var(--mono);color:var(--dim);margin:3px 6px 0}
 .msg.nurse{align-self:flex-start}.msg.nurse .t{border-color:rgba(90,169,255,.35);border-bottom-left-radius:4px}
 .msg.patient{align-self:flex-end;align-items:flex-end}.msg.patient .t{border-color:rgba(61,220,151,.4);background:rgba(61,220,151,.08);border-bottom-right-radius:4px;font-weight:600}
 .msg.critical .t{border-color:var(--bad);background:rgba(255,84,104,.12);color:#ffd4d8}
@@ -196,10 +200,10 @@ input.txt:focus,.ctxform input:focus,.ctxform textarea:focus{outline:none;border
 .latbar .seg{height:100%;transition:width .5s;min-width:2px}
 .latbar .seg:first-child{border-radius:7px 0 0 7px}.latbar .seg:last-of-type{border-radius:0 7px 7px 0}
 .latbar .target{position:absolute;top:-4px;bottom:-4px;width:2px;background:rgba(255,255,255,.55);left:66.6%}
-.latbar .target span{position:absolute;top:-14px;left:-8px;white-space:nowrap;font:600 9px var(--mono);color:var(--muted)}
-.latlegend{display:flex;gap:12px;flex-wrap:wrap;font:500 11px var(--mono);color:var(--muted)}
+.latbar .target span{position:absolute;top:-15px;left:-8px;white-space:nowrap;font:600 11px var(--mono);color:var(--muted)}
+.latlegend{display:flex;gap:12px;flex-wrap:wrap;font:500 13px var(--mono);color:var(--muted)}
 .latlegend i{display:inline-block;width:8px;height:8px;border-radius:2px;margin-right:5px;vertical-align:middle}
-.vitals{display:flex;gap:12px;flex-wrap:wrap;font:500 11px var(--mono);color:var(--dim);margin-top:4px}
+.vitals{display:flex;gap:12px;flex-wrap:wrap;font:500 13px var(--mono);color:var(--dim);margin-top:4px}
 .vitals b{color:var(--muted)}
 
 /* ---------- dev tab */
@@ -237,8 +241,9 @@ input.txt:focus,.ctxform input:focus,.ctxform textarea:focus{outline:none;border
 .dec td{padding:2px 10px 2px 0;color:var(--muted)}
 
 /* ---------- toast, alert, demo bar */
-.toast{position:fixed;left:50%;bottom:22px;transform:translate(-50%,20px);background:#2a1418;border:1px solid rgba(255,84,104,.5);color:#ffd4d8;border-radius:12px;padding:10px 16px;font:500 14px Inter;opacity:0;pointer-events:none;transition:opacity .25s,transform .25s;z-index:40;max-width:80vw}
-.toast.on{opacity:1;transform:translate(-50%,0)}
+.toasts{position:fixed;left:50%;bottom:22px;transform:translateX(-50%);display:flex;flex-direction:column;align-items:center;gap:8px;z-index:40;pointer-events:none;max-width:80vw}
+.toast{background:#2a1418;border:1px solid rgba(255,84,104,.5);color:#ffd4d8;border-radius:12px;padding:10px 16px;font:500 14px Inter;animation:toastin .25s ease-out}
+@keyframes toastin{0%{opacity:0;transform:translateY(20px)}100%{opacity:1;transform:none}}
 .toast.good{background:#10281d;border-color:rgba(61,220,151,.5);color:#c9f5df}
 #alert{position:fixed;inset:0;background:rgba(120,0,16,.95);display:none;align-items:center;justify-content:center;flex-direction:column;gap:18px;z-index:50;text-align:center;padding:40px}
 #alert.on{display:flex;animation:flash 1s infinite}
@@ -247,10 +252,15 @@ input.txt:focus,.ctxform input:focus,.ctxform textarea:focus{outline:none;border
 #alert .t{font-size:clamp(52px,8vw,140px);font-weight:800;line-height:1.02;color:#fff;letter-spacing:-2px}
 #alert .s{font-size:20px;color:#ffd4d8}
 #alert button{background:#fff;color:#7a0010;border:0;border-radius:14px;padding:16px 34px;font:800 20px Inter;cursor:pointer}
-#demobar{position:fixed;left:18px;bottom:18px;display:none;align-items:center;gap:10px;background:rgba(15,22,31,.92);border:1px solid rgba(177,140,255,.45);border-radius:12px;padding:8px 10px 8px 14px;font:600 12px Inter;color:var(--muted);z-index:45;backdrop-filter:blur(6px)}
+#demobar{position:fixed;left:18px;bottom:18px;display:none;align-items:center;gap:10px;background:rgba(15,22,31,.92);border:1px solid rgba(177,140,255,.45);border-radius:12px;padding:8px 10px 8px 14px;font:600 12px Inter;color:var(--muted);z-index:45;backdrop-filter:blur(6px);max-width:calc(36vw - 26px)}  /* stays within the left column */
 #demobar.on{display:flex}
 body:has(#demobar.on) .col.left{padding-bottom:64px}
+#demobar span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 #demobar b{color:var(--gesture);letter-spacing:1.5px}
 #demobar button{background:var(--panel2);border:1px solid var(--line);color:var(--text);border-radius:8px;padding:5px 9px;font:600 12px Inter;cursor:pointer}
 
-@media (max-width:1100px){#tab-patient,#tab-dev{grid-template-columns:1fr;height:auto}.grid2{grid-template-columns:1fr}.nursebar input.txt{width:160px}}
+@media (max-height:820px){.tab{padding:12px;gap:12px}.col{gap:10px}.listen{height:64px;font-size:20px}.signals{gap:6px}.sig{padding:6px 10px}.sig .v{font-size:16px;margin-top:0}.painbar{margin-top:6px}
+  .nursebar{padding:6px 10px}.hero{padding:14px 22px;min-height:0;gap:20px}.ring{width:112px;height:112px}.ring .pct{font-size:28px}.ring .ringlbl{bottom:22px}
+  .hero .text{font-size:clamp(36px,4.4vw,100px)}.hero .text.mid{font-size:clamp(30px,3vw,68px)}.eyebrow{margin-bottom:4px}.reason{margin-top:6px;font-size:14px}
+  .confirmbar{margin-top:8px}.confirmrow{margin-top:6px}.confirmrow button{padding:7px 14px}.conf{margin-top:8px}.grid2{min-height:150px;gap:10px}.vitals{display:none}}
+@media (max-width:1100px){#tab-patient,#tab-dev{grid-template-columns:1fr;height:auto}.grid2{grid-template-columns:1fr}.logscroll,.dym{max-height:45vh}.nursebar input.txt{width:160px}}
