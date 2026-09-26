@@ -100,7 +100,7 @@ function result(rows,{nonverbal,emotion='neutral',intensity=0,changed=false,dur=
 }
 function decision(u,text,confidence,source,reason,alternatives=[],action='speak',provider='grok-4 · xAI'){
   ev({type:'decision',utt_id:u,text,confidence,source,reason,provider,alternatives,action});}
-function audioSoon(){setTimeout(()=>latMark('audio'),180+Math.random()*120);}  // the demo may have no audible voice until the page is clicked
+function audioSoon(u){setTimeout(()=>latMark(u,'audio'),180+Math.random()*120);}  // the demo may have no audible voice until the page is clicked
 async function ask(u,candidate,attempt,scripted){
   ev({type:'confirm',utt_id:u,candidate,attempt,state:'asking'});answer=null;
   for(let t=0;t<2000&&answer===null;t+=50)await sleep(50);
@@ -115,7 +115,7 @@ const SCENES=[
    nurse('How is your pain right now?');await sleep(1600);
    await mouth(1700);F.grimace=.65;signal('pain',.64,.72);await sleep(380);
    const u=result([['I am in pain',.46,.71,['keywords:pain']],['I am in bed',.21,.09],['I am tired',.12,.07],['I need a blanket',.08,.05],['The pain is getting worse',.06,.05]],
-     {nonverbal:nv({pain:.64,emotion:'sad',intensity:.5}),emotion:'sad',intensity:.5});audioSoon();
+     {nonverbal:nv({pain:.64,emotion:'sad',intensity:.5}),emotion:'sad',intensity:.5});audioSoon(u);
    await sleep(420);
    decision(u,'I am in pain',.9,'fused','Lips favour “I am in pain” (46% visual). The nurse asked about pain and the face shows a 6/10 grimace, so fused confidence is high.',[{text:'The pain is getting worse',confidence:.06},{text:'I am tired',confidence:.03}]);
    patientSays('I am in pain',.9,{source:'fused',emotion:'sad'});await sleep(4200);F.grimace=0;}},
@@ -130,7 +130,7 @@ const SCENES=[
    const u=result([['I am hot',.41,.41],['I am cold',.38,.38],['I need a blanket',.09,.09],['I am OK',.06,.06],['I am tired',.04,.04]]);
    await sleep(420);
    decision(u,'I am hot',.44,'fused','“Hot” and “cold” look almost identical on the lips (41% vs 38%), and the question fits both. Asking the patient to confirm.',[{text:'I am cold',confidence:.4},{text:'I need a blanket',confidence:.1}],'confirm');
-   audioSoon();
+   audioSoon(u);
    if(!await ask(u,'I am hot',1,false)){await sleep(600);if(await ask(u,'I am cold',2,true))patientSays('I am cold',.95,{source:'fused'});}
    else patientSays('I am hot',.95,{source:'fused'});
    await sleep(3500);}},
@@ -154,7 +154,7 @@ const SCENES=[
 transport.send=async o=>{
   if(o.cmd==='start'){manual=true;F.listening=true;F.listenT=performance.now()/1000;status('listening');F.talk=true;signal('mouthing',true);}
   else if(o.cmd==='stop'){if(!manual)return;F.talk=false;signal('mouthing',false);F.listening=false;status('processing','crop');await wait(380);
-    const u=result([['I need water',.52,.68,['keywords:water']],['I need a blanket',.18,.12],['I need ice chips',.11,.08],['I need to cough',.07,.05]]);audioSoon();
+    const u=result([['I need water',.52,.68,['keywords:water']],['I need a blanket',.18,.12],['I need ice chips',.11,.08],['I need to cough',.07,.05]]);audioSoon(u);
     await wait(400);decision(u,'I need water',.86,'fused','Lips favour “I need water”; no conflicting context.',[{text:'I need ice chips',confidence:.08}]);
     patientSays('I need water',.86,{source:'fused'});await wait(2500);manual=false;}
   else if(o.cmd==='nurse_text'){nurse(o.text);}
@@ -184,6 +184,6 @@ const DEMO_PHRASES={urgent:["I can't breathe","I am choking","My chest hurts","I
   people:['Call my family','Where is my family','Call the nurse'],
   feelings:['I am scared','I am OK','Thank you'],answers:['Yes','No','I don\'t know']};
 const table=Object.entries(DEMO_PHRASES).flatMap(([category,ps])=>ps.map(phrase=>({phrase,category,critical:category==='urgent'})));
-ev({type:'hello',state:{mode:'phrase',expressive:true},phrases:table.map(r=>r.phrase),phrase_table:table,context:{notes:'Trach day 3, alert, mouths words',category:null,last_prompt:'',history:[]},log:[]});
+ev({type:'hello',state:{mode:'phrase',expressive:true,status:'idle'},phrases:table.map(r=>r.phrase),phrase_table:table,context:{notes:'Trach day 3, alert, mouths words',category:null,last_prompt:'',history:[]},log:[]});
 $('#engine').textContent='DEMO · simulated events, no backend';status('idle');runner();
 })();

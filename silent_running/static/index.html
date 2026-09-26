@@ -90,7 +90,7 @@ const V=Date.now();document.write(`<link rel="stylesheet" href="/static/app.css?
     <div class="grid2">
       <div class="panel">
         <h3>Conversation</h3>
-        <div class="log" id="log"><span class="small">Nothing yet. Nurse asks, patient mouths, laptop answers.</span></div>
+        <div class="logscroll" id="logscroll"><div class="log" id="log"><span class="small">Nothing yet. Nurse asks, patient mouths, laptop answers.</span></div></div>
       </div>
       <div class="panel">
         <h3>Candidates · tap to say <span class="legend"><i class="lv"></i>visual <i class="lc"></i>with context</span></h3>
@@ -166,7 +166,7 @@ const V=Date.now();document.write(`<link rel="stylesheet" href="/static/app.css?
 </section>
 </main>
 
-<div class="toast" id="err"></div>
+<div class="toasts" id="err"></div>
 <div id="alert"><div class="alertkicker">Critical · patient says</div><div class="t" id="alerttext"></div><div class="s" id="alertsub">Critical phrase recognized · speaking twice</div><button id="alertok">Acknowledge</button></div>
 <div id="demobar"></div>
 
