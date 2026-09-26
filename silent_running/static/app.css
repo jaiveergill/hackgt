@@ -268,3 +268,6 @@ body:has(#demobar.on) .col.left{padding-bottom:64px}
   .hero .text{font-size:clamp(36px,4.4vw,100px)}.hero .text.mid{font-size:clamp(30px,3vw,68px)}.eyebrow{margin-bottom:4px}.reason{margin-top:6px;font-size:14px}
   .confirmbar{margin-top:8px}.confirmrow{margin-top:6px}.confirmrow button{padding:7px 14px}.conf{margin-top:8px}.grid2{min-height:150px;gap:10px}.vitals{display:none}}
 @media (max-width:1100px){#tab-patient,#tab-dev{grid-template-columns:1fr;height:auto}.grid2{grid-template-columns:1fr;grid-template-rows:none;flex:none}.logscroll,.dym{max-height:45vh}.nursebar input.txt{width:160px}}
+
+.warmup{padding:6px 12px;border-radius:999px;border:1px solid rgba(255,181,71,.5);background:var(--panel2);font:700 11px Inter;letter-spacing:1.4px;text-transform:uppercase;color:var(--confirm)}
+.warmup[hidden]{display:none}

@@ -934,6 +934,7 @@ def main():
         except Exception as e:
             print("[prosody] aligner prewarm failed:", e)
         STATE["warm"] = True  # engine warmup (above) and aligner prewarm are done: latency measured from now on is steady state
+        broadcast({"type": "state", "state": STATE})  # the UI shows "warming up" until this arrives
     threading.Thread(target=_prewarm_aligner, daemon=True).start()
     import uvicorn
     # an open preview (/stream) never ends on its own: give open connections 3 s on shutdown, then close them
