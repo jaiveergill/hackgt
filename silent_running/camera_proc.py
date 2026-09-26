@@ -102,6 +102,7 @@ def _worker(conn, spec, width, height, preview_width, buffer_seconds):
     from silent_running.signals.aggregate import Signals
     fl = FaceLandmarker()
     expr = ExpressionTracker()
+    signals = Signals()
     vp = VideoProcess(convert_gray=True)
 
     t_origin = time.time()  # one clock for every landmarker call (VIDEO mode needs increasing timestamps), probe included
@@ -114,7 +115,7 @@ def _worker(conn, spec, width, height, preview_width, buffer_seconds):
         return
     conn.send(("opened", src.info()))
     out = _Outbox(conn)
-    signals = Signals(out.send)  # after "opened": its sends go through the outbox like every other worker message
+    signals.attach(out.send)  # after "opened": its sends go through the outbox like every other worker message
     STALL_S, MAX_RETRY_S = 1.5, 8.0  # report + reopen a live camera after 1.5 s without frames; back off to 8 s while it stays gone
     last_frame = last_reopen = time.time()
     retry_s = STALL_S

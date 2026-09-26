@@ -20,7 +20,7 @@ import numpy as np, cv2
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from silent_running.signals import hands as H
 from silent_running.signals.aggregate import Signals, HAND_KINDS
-from scripts.eval_hands import crop, DATA, EXPECTED
+from scripts.eval_hands import crop, DATA
 
 W, HEIGHT, FPS = 640, 480, 30
 NEUTRAL = {"emotion": "neutral", "intensity": 0.0}
@@ -93,7 +93,8 @@ def main():
     cap = cv2.VideoCapture(args.video)
     fps = cap.get(cv2.CAP_PROP_FPS) or FPS
     sent = []
-    signals = Signals(sent.append)
+    signals = Signals()
+    signals.attach(sent.append)
     if not signals.hands:
         sys.exit(f"hands {signals.status}")
     got, costs, i = [], [], 0
