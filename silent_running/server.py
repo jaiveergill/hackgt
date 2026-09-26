@@ -4,6 +4,7 @@
 """
 import os, sys, json, time, asyncio, threading, argparse, subprocess, re, queue, traceback
 sys.setswitchinterval(0.0005)  # many tiny torch ops on MPS/CPU must not wait 5 ms behind the camera thread each
+import av
 import numpy as np
 import torch
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
@@ -17,6 +18,7 @@ from silent_running.camera_proc import CameraProcess
 from silent_running.signals.aggregate import nonverbal_dict
 from silent_running.context import ContextStore, OpenAIChooser
 from silent_running.decoder import PhraseDecoder
+from silent_running.enroll import Profile, Enrollment, list_profiles, MIN_PHRASES
 from silent_running import tts as eltts
 from silent_running import prosody
 from silent_running import confirm as confirm_mod
@@ -27,7 +29,7 @@ app.mount("/static", StaticFiles(directory=STATIC), name="static")
 
 LLM_MARGIN = 3.0  # nats; an LLM proposal is accepted only if the visual model scores it within this of the raw top hypothesis
 PHRASE_GAP_THRESHOLD = 6.0  # nats; free transcript beating every phrase by more than this => "no phrase matched"
-STATE = {"mode": "phrase", "auto_listen": False, "auto_speak": True, "tts": "browser", "voice": None, "expressive": True, "emotion_override": None, "llm_enabled": True, "status": "idle", "utt_id": 0, "warm": False}
+STATE = {"mode": "phrase", "auto_listen": False, "auto_speak": True, "tts": "browser", "voice": None, "expressive": True, "emotion_override": None, "llm_enabled": True, "status": "idle", "utt_id": 0, "warm": False, "profile": None, "enroll": None}
 clients = set()
 loop = None
 engine = camera = context = phrase_decoder = llm = confirm_loop = None
@@ -37,6 +39,7 @@ CRITICAL = {r["phrase"].lower() for r in PHRASE_TABLE if r["critical"]}
 CATEGORY_OF = {r["phrase"].lower(): r["category"] for r in PHRASE_TABLE}
 CRITICAL_CONF = 0.5
 LOG = []  # conversation log: [{ts, who, text, ...}]
+ENROLL = {"session": None}  # active enroll.Enrollment while the patient is enrolling; captured utterances go there instead of decoding
 work_lock = threading.Lock()
 SYSTEM_VOICE = "Daniel"  # macOS voice for the server's own prompts ("Sounds like: X?"); never the patient's voice (Samantha / ElevenLabs)
 SIGNAL_KINDS = ("nod", "shake", "blink_code", "fingers", "thumb", "point", "pain", "mouthing")  # shared event contract
@@ -75,6 +78,11 @@ def run_decode(rois, n_face, n_total, duration, source="webcam", label=None, t_c
     t0 = t_queued - t_crop  # end of the utterance: every latency below includes the wait for work_lock
     with work_lock:
         wait = time.time() - t_queued
+        sess = ENROLL["session"]
+        if sess is not None:  # enrollment started while this utterance waited for the lock: recognition is off
+            broadcast({"type": "error", "message": "utterance not decoded: enrollment started"})
+            _enroll_status(sess)
+            return None
         STATE["utt_id"] += 1
         uid = STATE["utt_id"]
         set_status("processing", utt_id=uid, stage="encode")
@@ -92,7 +100,7 @@ def run_decode(rois, n_face, n_total, duration, source="webcam", label=None, t_c
         t3 = time.time()
         broadcast({"type": "raw", "utt_id": uid, "stage": "greedy", "text": greedy, "n_frames": int(x.shape[1]), "duration": duration,
                    "latency": {"lock": wait, "crop": t1 - t0 - wait, "encode": t2 - t1, "greedy": t3 - t2}})
-        result = {"utt_id": uid, "mode": STATE["mode"], "raw_greedy": greedy, "n_frames": int(x.shape[1]), "duration": duration, "source": source, "label": label,
+        result = {"utt_id": uid, "mode": STATE["mode"], "profile": STATE["profile"], "raw_greedy": greedy, "n_frames": int(x.shape[1]), "duration": duration, "source": source, "label": label,
                   "expression": expression or {"emotion": "neutral", "intensity": 0.0}}
         result["nonverbal"] = nonverbal or nonverbal_dict(result["expression"])  # no camera (decode_file): every entry absent
         LAST["enc"] = enc; LAST["utt_id"] = uid
@@ -536,9 +544,8 @@ def api_source(spec: str):
     return {"ok": True, "source": camera.source_info}
 
 
-@app.post("/api/decode_file")
-def api_decode_file(path: str, label: str = None):
-    """Run the identical pipeline on a video file (for evaluation / fallback demos)."""
+def _file_rois(path):
+    """Video file -> (abs path, mouth crops, n_face, n_frames, crop seconds, fps), or a JSONResponse error."""
     p = path if os.path.isabs(path) else os.path.join(ROOT, path)
     if not os.path.exists(p):
         return JSONResponse({"error": "not found"}, status_code=404)
@@ -552,8 +559,189 @@ def api_decode_file(path: str, label: str = None):
         rois = engine.mouth_rois(frames, lms)
     except Exception as e:
         return JSONResponse({"error": f"crop failed: {e}"}, status_code=400)
-    res = run_decode(rois, n_face, len(lms), len(frames) / 25.0, source=os.path.relpath(p, ROOT), label=label, t_crop=time.time() - t0)
+    with av.open(p) as c:
+        fps = float(c.streams.video[0].average_rate)
+    return p, rois, n_face, len(frames), time.time() - t0, fps
+
+
+@app.post("/api/decode_file")
+def api_decode_file(path: str, label: str = None):
+    """Run the identical pipeline on a video file (for evaluation / fallback demos)."""
+    r = _file_rois(path)
+    if isinstance(r, JSONResponse):
+        return r
+    p, rois, n_face, n, t_crop, _ = r
+    res = run_decode(rois, n_face, n, n / 25.0, source=os.path.relpath(p, ROOT), label=label, t_crop=t_crop)
+    if res is None and ENROLL["session"] is not None:
+        return JSONResponse({"error": "enrolling: recognition is off until /api/enroll/stop (use /api/enroll/file to add a take)"}, status_code=409)
     return res or {"error": "decode failed"}
+
+
+# ----------------------------------------------------------------------------- patient enrollment (enroll.py)
+# While a session is active, recognition is off: every captured utterance is stored as a take of the prompted phrase.
+# The UI sees this as status "enrolling" (stage = the prompt) and STATE["enroll"]; `enroll` events carry each step.
+def _enroll_status(sess):
+    s = sess.snapshot()
+    STATE["enroll"] = s
+    set_status("enrolling", stage=f"mouth \"{s['prompt']}\" ({s['done'] + 1}/{s['total']})")
+
+
+def _enroll_take(sess, rois, phrase=None):
+    """Encode one captured utterance and store it as a take in `sess` (work_lock held). Returns the enroll event.
+    The last prompt finishes the session (profile saved and activated) so live decoding resumes by itself."""
+    enc = engine.encode(engine.to_model_input(rois))
+    if not engine.ctc_greedy(enc).strip():
+        raise ValueError("no mouth movement detected; take not stored. Mouth the phrase clearly and try again.")
+    stored = sess.add(enc, phrase)
+    sess.profile.save()
+    msg = {"type": "enroll", "state": "take", "stored": stored, "n_frames": int(enc.shape[0]), **sess.snapshot()}
+    broadcast(msg)
+    if sess.prompt is None:
+        return _finish_enrollment(sess, "finished")
+    _enroll_status(sess)
+    return msg
+
+
+def _finish_enrollment(sess, state):
+    """End the session (work_lock held) and activate its profile; if it cannot give evidence yet, use the generic model
+    (never the profile that was active before: the patient in front of the camera is the one who was enrolling)."""
+    ENROLL["session"] = None
+    STATE["enroll"] = None
+    sess.profile.save()
+    active = sess.profile.ready
+    _set_profile(sess.profile if active else None)
+    if not active:
+        broadcast({"type": "error", "message": f"profile {sess.profile.name!r} saved but not activated: it needs takes of at least "
+                                              f"{MIN_PHRASES} phrases. Using the generic model."})
+    set_status("idle")
+    msg = {"type": "enroll", "state": state, "activated": active, **sess.snapshot()}
+    broadcast(msg)
+    return msg
+
+
+def _set_profile(prof):
+    """Make `prof` (a ready enroll.Profile, or None = generic model) the active profile. Call with work_lock held, so
+    a switch never lands in the middle of a decode."""
+    phrase_decoder.profile = prof
+    STATE["profile"] = prof.name if prof else None
+    broadcast({"type": "state", "state": STATE})
+
+
+def _load_ready_profile(name):
+    """-> the saved enroll.Profile `name`. LookupError if there is none, ValueError if it cannot produce evidence yet."""
+    if name not in list_profiles():
+        raise LookupError(f"no profile {name!r}; have {list_profiles()}")
+    prof = Profile.load(name)
+    if not prof.ready:
+        raise ValueError(f"profile {name!r} needs takes of at least {MIN_PHRASES} phrases; continue enrolling it first")
+    return prof
+
+
+def _enroll_utterance(rois):
+    """If an enrollment session is active, store the captured utterance as its next take and return True."""
+    with work_lock:
+        sess = ENROLL["session"]
+        if sess is None:
+            return False
+        try:
+            _enroll_take(sess, rois)
+        except Exception as e:  # capture thread, nobody above reports it: say why, and keep the prompt if still enrolling
+            if not isinstance(e, ValueError):  # ValueError = a rejected take, explained in its message
+                traceback.print_exc()
+            broadcast({"type": "error", "message": f"enrollment: {e}"})
+            if ENROLL["session"] is sess:
+                _enroll_status(sess)
+    return True
+
+
+@app.get("/api/enroll")
+def api_enroll():
+    s = ENROLL["session"]
+    prof = phrase_decoder.profile
+    return {"profiles": list_profiles(), "active": STATE["profile"], "session": s.snapshot() if s else None,
+            "counts": prof.counts() if prof else {}}
+
+
+@app.post("/api/enroll/start")
+def api_enroll_start(profile: str, reps: int = 2):
+    """Start (or continue) enrolling `profile`: every captured utterance is stored as a take of the prompted phrase
+    (each inventory phrase `reps` times, counting takes it already has) instead of being decoded, until the queue is
+    done or /api/enroll/stop. 400 if there is nothing left to enroll."""
+    try:
+        sess = Enrollment(Profile.load(profile), phrases, reps)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    with work_lock:  # no decode is in flight, and run_decode refuses once the session is set: no confirmation can start
+        if ENROLL["session"] is not None:
+            return JSONResponse({"error": f"already enrolling {ENROLL['session'].profile.name!r}; POST /api/enroll/stop first"}, status_code=409)
+        ENROLL["session"] = sess
+        confirm_loop.cancel("enrollment started")
+        msg = {"type": "enroll", "state": "started", **sess.snapshot()}
+        broadcast(msg)
+        _enroll_status(sess)
+    return msg
+
+
+@app.post("/api/enroll/stop")
+def api_enroll_stop():
+    """End the session early and make its profile the active one."""
+    with work_lock:
+        s = ENROLL["session"]
+        if s is None:
+            return JSONResponse({"error": "no enrollment in progress"}, status_code=400)
+        return _finish_enrollment(s, "stopped")
+
+
+@app.post("/api/enroll/undo")
+def api_enroll_undo(phrase: str = None):
+    """Discard the last take (or the last take of `phrase`) and prompt that phrase again next."""
+    with work_lock:
+        sess = ENROLL["session"]
+        if sess is None:
+            return JSONResponse({"error": "no enrollment in progress"}, status_code=400)
+        try:
+            removed = sess.undo(phrase)
+        except ValueError as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
+        sess.profile.save()
+        msg = {"type": "enroll", "state": "undo", "removed": removed, **sess.snapshot()}
+        broadcast(msg)
+        _enroll_status(sess)
+    return msg
+
+
+@app.post("/api/enroll/file")
+def api_enroll_file(path: str, phrase: str = None):
+    """Enroll a recorded clip as a take of `phrase` (default: the current prompt), through the same crop + encoder."""
+    if phrase is not None and phrase not in phrases:
+        return JSONResponse({"error": f"not an inventory phrase: {phrase!r}"}, status_code=400)
+    r = _file_rois(path)
+    if isinstance(r, JSONResponse):
+        return r
+    if abs(r[5] - 25.0) > 0.01:  # a take is a template for live 25 fps captures; other rates would skew its DTW similarity
+        return JSONResponse({"error": f"clip is {r[5]:.2f} fps; enrollment takes must be 25 fps (ffmpeg -r 25)"}, status_code=400)
+    with work_lock:
+        sess = ENROLL["session"]
+        if sess is None:
+            return JSONResponse({"error": "no enrollment in progress; POST /api/enroll/start first"}, status_code=400)
+        try:
+            return _enroll_take(sess, r[1], phrase)
+        except ValueError as e:  # a rejected take (before anything is stored)
+            broadcast({"type": "error", "message": f"enrollment: {e}"})
+            _enroll_status(sess)
+            return JSONResponse({"error": str(e)}, status_code=400)
+
+
+@app.post("/api/profile")
+def api_profile(name: str = ""):
+    """Switch the active patient profile; empty name = generic model. Waits for an in-flight decode to finish."""
+    try:
+        prof = _load_ready_profile(name) if name else None
+    except (LookupError, ValueError) as e:
+        return JSONResponse({"error": str(e)}, status_code=404 if isinstance(e, LookupError) else 400)
+    with work_lock:
+        _set_profile(prof)
+    return {"active": STATE["profile"], "counts": prof.counts() if prof else {}}
 
 
 # ----------------------------------------------------------------------------- WebSocket
@@ -644,6 +832,11 @@ def _decode_utterance(u, source="webcam"):
         set_status("idle")
         msgs = {"too short": "Utterance too short. Hold Listen while you mouth the phrase.", "face not tracked": f"Face not tracked well enough ({u['n_face']}/{u['n_total']} frames). Face the camera and try again."}
         broadcast({"type": "error", "message": msgs.get(u["error"], u["error"] or "capture failed")})
+        sess = ENROLL["session"]
+        if sess is not None:  # keep showing the prompt: the patient mouths it again
+            _enroll_status(sess)
+        return
+    if _enroll_utterance(u["rois"]):
         return
     run_decode(u["rois"], u["n_face"], u["n_total"], u["duration"], source=source, t_crop=u["t_crop"], expression=u.get("expression"), nonverbal=u.get("nonverbal"))
 
@@ -705,6 +898,7 @@ def main():
     ap.add_argument("--model-dir", default=None, help="VSR checkpoint dir (default models/LRS3_V_WER19.1; use models/adapted_<name> after scripts/adapt.py)")
     ap.add_argument("--voice", default=None, help="default TTS voice: cloned speaker name or stock ElevenLabs voice name (e.g. Bella)")
     ap.add_argument("--no-camera", action="store_true")
+    ap.add_argument("--profile", default=None, help="enrolled patient profile to activate at start (data/profiles/<name>.pt)")
     ap.add_argument("--confirm-timeout", type=float, default=confirm_mod.TIMEOUT, help="seconds to wait for a nod/shake after 'Sounds like: X?'")
     args = ap.parse_args()
     t0 = time.time()
@@ -716,6 +910,11 @@ def main():
     print(f"[engine] loaded + warmed in {time.time()-t0:.1f}s (encoder on {engine.device}, decoder on {engine.decode_device})")
     context = ContextStore()
     phrase_decoder = PhraseDecoder(engine, phrases, context, gamma=args.gamma)
+    if args.profile:
+        try:
+            _set_profile(_load_ready_profile(args.profile))
+        except (LookupError, ValueError) as e:
+            sys.exit(str(e))
     confirm_loop = confirm_mod.ConfirmLoop(_confirm_emit, _on_confirmed, timeout=args.confirm_timeout)
     threading.Thread(target=_signal_worker, daemon=True).start()  # camera signals, including cameras created later via /api/source
     llm = OpenAIChooser(model=args.llm)
