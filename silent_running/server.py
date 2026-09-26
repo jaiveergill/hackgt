@@ -4,6 +4,7 @@
 """
 import os, sys, json, time, asyncio, threading, argparse, subprocess, re, queue, traceback
 sys.setswitchinterval(0.0005)  # many tiny torch ops on MPS/CPU must not wait 5 ms behind the camera thread each
+import av
 import numpy as np
 import torch
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
@@ -544,7 +545,7 @@ def api_source(spec: str):
 
 
 def _file_rois(path):
-    """Video file -> (abs path, mouth crops, n_face, n_frames, crop seconds), or a JSONResponse error."""
+    """Video file -> (abs path, mouth crops, n_face, n_frames, crop seconds, fps), or a JSONResponse error."""
     p = path if os.path.isabs(path) else os.path.join(ROOT, path)
     if not os.path.exists(p):
         return JSONResponse({"error": "not found"}, status_code=404)
@@ -558,19 +559,21 @@ def _file_rois(path):
         rois = engine.mouth_rois(frames, lms)
     except Exception as e:
         return JSONResponse({"error": f"crop failed: {e}"}, status_code=400)
-    return p, rois, n_face, len(frames), time.time() - t0
+    with av.open(p) as c:
+        fps = float(c.streams.video[0].average_rate)
+    return p, rois, n_face, len(frames), time.time() - t0, fps
 
 
 @app.post("/api/decode_file")
 def api_decode_file(path: str, label: str = None):
     """Run the identical pipeline on a video file (for evaluation / fallback demos)."""
-    if ENROLL["session"] is not None:
-        return JSONResponse({"error": "enrolling: recognition is off until /api/enroll/stop (use /api/enroll/file to add a take)"}, status_code=409)
     r = _file_rois(path)
     if isinstance(r, JSONResponse):
         return r
-    p, rois, n_face, n, t_crop = r
+    p, rois, n_face, n, t_crop, _ = r
     res = run_decode(rois, n_face, n, n / 25.0, source=os.path.relpath(p, ROOT), label=label, t_crop=t_crop)
+    if res is None and ENROLL["session"] is not None:
+        return JSONResponse({"error": "enrolling: recognition is off until /api/enroll/stop (use /api/enroll/file to add a take)"}, status_code=409)
     return res or {"error": "decode failed"}
 
 
@@ -642,11 +645,12 @@ def _enroll_utterance(rois):
             return False
         try:
             _enroll_take(sess, rois)
-        except Exception as e:  # capture thread, nobody above reports it: the take is not stored; say why, keep the prompt
-            if not isinstance(e, ValueError):  # ValueError = a rejected take, already explained in its message
+        except Exception as e:  # capture thread, nobody above reports it: say why, and keep the prompt if still enrolling
+            if not isinstance(e, ValueError):  # ValueError = a rejected take, explained in its message
                 traceback.print_exc()
             broadcast({"type": "error", "message": f"enrollment: {e}"})
-            _enroll_status(sess)
+            if ENROLL["session"] is sess:
+                _enroll_status(sess)
     return True
 
 
@@ -714,13 +718,15 @@ def api_enroll_file(path: str, phrase: str = None):
     r = _file_rois(path)
     if isinstance(r, JSONResponse):
         return r
+    if abs(r[5] - 25.0) > 0.01:  # a take is a template for live 25 fps captures; other rates would skew its DTW similarity
+        return JSONResponse({"error": f"clip is {r[5]:.2f} fps; enrollment takes must be 25 fps (ffmpeg -r 25)"}, status_code=400)
     with work_lock:
         sess = ENROLL["session"]
         if sess is None:
             return JSONResponse({"error": "no enrollment in progress; POST /api/enroll/start first"}, status_code=400)
         try:
             return _enroll_take(sess, r[1], phrase)
-        except ValueError as e:
+        except ValueError as e:  # a rejected take (before anything is stored)
             broadcast({"type": "error", "message": f"enrollment: {e}"})
             _enroll_status(sess)
             return JSONResponse({"error": str(e)}, status_code=400)

@@ -73,11 +73,6 @@ def impostor_mean(sim, labels):
     return float(best[col[:, None] != torch.arange(len(names))].mean())
 
 
-def template_evidence(best, mu, slope=SLOPE, offset=OFFSET):
-    """{phrase: best similarity} and the profile's impostor mean -> {phrase: log-likelihood ratio in nats}."""
-    return {p: slope * (s - mu) - offset for p, s in best.items()}
-
-
 class Profile:
     def __init__(self, name):
         if not NAME.fullmatch(name):
@@ -145,8 +140,8 @@ class Profile:
         idx = [k for k, p in enumerate(self.phrases) if p in wanted]
         if not idx:
             return {}
-        sims = dtw_similarity(enc, [self.encs[k] for k in idx])
-        return template_evidence(best_per_phrase(sims.tolist(), [self.phrases[k] for k in idx]), self.mu)
+        best = best_per_phrase(dtw_similarity(enc, [self.encs[k] for k in idx]).tolist(), [self.phrases[k] for k in idx])
+        return {p: SLOPE * (s - self.mu) - OFFSET for p, s in best.items()}
 
 
 def list_profiles():
@@ -165,7 +160,7 @@ class Enrollment:
         self.queue = [p for r in range(reps) for p in phrases if have.get(p, 0) <= r]
         if not self.queue:
             raise ValueError(f"nothing left to enroll for {profile.name!r}: every phrase already has {reps} take(s)")
-        self.profile = profile
+        self.profile, self.reps = profile, reps
         self.done = 0
         self.t_start = time.time()
 
@@ -182,22 +177,26 @@ class Enrollment:
                                  f"Mouth it again, or discard the earlier take (POST /api/enroll/undo, phrase={phrase!r}) if that one was wrong.")
 
     def add(self, enc, phrase=None):
-        """Store `enc` as a take of `phrase` (default: the current prompt) and advance. Returns the phrase stored."""
+        """Store `enc` as a take of `phrase` (default: the current prompt) and tick off that phrase's next pending
+        prompt, so an out-of-order take (a file) is not asked for again. Returns the phrase stored."""
         phrase = phrase or self.prompt
         self.check(enc, phrase)
         self.profile.add(phrase, enc)
-        if phrase == self.prompt:
+        if phrase in self.queue[self.done:]:
+            self.queue.insert(self.done, self.queue.pop(self.queue.index(phrase, self.done)))
             self.done += 1
         return phrase
 
     def undo(self, phrase=None):
-        """Discard the last take (of `phrase`, if given) and prompt its phrase again next. Returns the phrase."""
+        """Discard the last take (of `phrase`, if given) and, if that leaves it short of `reps` takes, prompt it next.
+        Returns the phrase."""
         if phrase is not None and phrase not in self.profile.counts():
             raise ValueError(f"no take of {phrase!r} to discard")
         if not self.profile.phrases:
             raise ValueError("no take to discard")
         removed = self.profile.remove_last(phrase)
-        self.queue.insert(self.done, removed)
+        if self.profile.counts().get(removed, 0) < self.reps:
+            self.queue.insert(self.done, removed)
         return removed
 
     def snapshot(self):
