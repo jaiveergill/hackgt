@@ -25,6 +25,18 @@ python -m silent_running.server            # http://127.0.0.1:8000
 Open Mode's LLM uses the OpenAI API (`gpt-4o-mini`); put `OPENAI_API_KEY=...` in `.env`. It never runs on the primary Phrase Mode path.
 Voice output: browser voices by default; with `ELEVEN_LABS_API_KEY` in `.env` the UI lists ElevenLabs stock voices (`--voice Bella`), and cloned voices once the account tier allows Instant Voice Cloning (see `plans/PLAN_3_VOICE_CLONING.md`).
 
+## Session logs (read these when something lagged)
+
+Every server start writes `logs/session_<timestamp>.jsonl` (`logs/latest.jsonl` points at the newest). It records, every 5 s,
+the capture process's frame stats (fps, p95 interval, gaps over 0.3 s, worst gap, face rate), a 3-packet ping to a network
+camera, and host load; plus every decode (latency breakdown, selection, confidence, early commit), streaming partial, voice
+delivery, alert, stall/reopen and error. Summarize a session with:
+
+```bash
+python scripts/session_report.py              # latest session
+python scripts/session_report.py --events     # plus a timeline of decodes, stalls and errors
+```
+
 ## Using the UI
 
 * **Phrase Mode** (primary demo): hold **HOLD TO LISTEN** (or the space bar), silently mouth one of the phrases

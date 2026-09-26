@@ -21,6 +21,7 @@ from silent_running.decoder import PhraseDecoder
 from silent_running.enroll import Profile, Enrollment, list_profiles, MIN_PHRASES
 from silent_running import tts as eltts
 from silent_running import prosody
+from silent_running import sessionlog
 from silent_running import confirm as confirm_mod
 
 STATIC = os.path.join(ROOT, "silent_running", "static")
@@ -48,6 +49,10 @@ signals = queue.Queue()  # camera signals, handled in arrival order off the came
 
 
 def broadcast(msg):
+    try:
+        sessionlog.from_broadcast(msg)
+    except Exception as e:
+        print("[sessionlog]", e)
     data = json.dumps(msg)
     async def _send():
         dead = []
@@ -347,6 +352,36 @@ def _safe_timing(enc, text):
         return prosody.video_word_timing(engine, enc, text)
     except Exception as e:
         print("[timing]", e); return None
+
+
+def _link_monitor():
+    """Every 5 s: the capture process's frame stats (fps, gaps) and, for a network camera, one ping to the board.
+    Lag that the user sees is diagnosable afterwards from these two lines alone."""
+    import re as _re
+    while True:
+        time.sleep(5.0)
+        try:
+            cam = camera
+            if cam is None:
+                continue
+            st = cam.stats
+            if st:
+                sessionlog.log("camera_stats", **st)
+            info = cam.source_info or {}
+            host = None
+            if info.get("kind") == "stream":
+                m = _re.match(r"https?://([^/:]+)", info.get("url", ""))
+                host = m.group(1) if m else None
+            if host:
+                p = subprocess.run(["ping", "-c", "3", "-i", "0.2", "-W", "1000", host], capture_output=True, text=True, timeout=6)
+                rtts = [float(x) for x in _re.findall(r"time=([\d.]+)", p.stdout)]
+                loss = _re.search(r"([\d.]+)% packet loss", p.stdout)
+                sessionlog.log("ping", host=host, rtt_ms=[round(r, 1) for r in rtts], max_ms=round(max(rtts), 1) if rtts else None,
+                               loss_pct=float(loss.group(1)) if loss else None)
+            cpu = os.getloadavg()[0]
+            sessionlog.log("host", load1=round(cpu, 2), busy=work_lock.locked(), status=STATE.get("status"), warm=STATE.get("warm"))
+        except Exception as e:
+            sessionlog.log("monitor_error", error=repr(e))
 
 
 def _keep_warm():
@@ -856,7 +891,7 @@ def _source_kind():
 def _make_camera(spec):
     cam = CameraProcess(source=spec)
     cam.on_auto_utterance = _on_auto_utterance
-    cam.on_error = lambda m: broadcast({"type": "error", "message": f"camera: {m}"})  # video source and hand-signal errors
+    cam.on_error = lambda m: (sessionlog.log("camera_error", message=m), broadcast({"type": "error", "message": f"camera: {m}"}))  # video source and hand-signal errors
     cam.on_signal = _on_camera_signal
     return cam
 
@@ -958,13 +993,21 @@ def main():
     threading.Thread(target=_signal_worker, daemon=True).start()  # camera signals, including cameras created later via /api/source
     llm = OpenAIChooser(model=args.llm)
     print(f"[llm] openai {args.llm} available={llm.available()}")
+    try:
+        sha = subprocess.run(["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True, cwd=ROOT).stdout.strip()
+    except Exception:
+        sha = None
+    logp = sessionlog.start(args=vars(args), git=sha, model_dir=STATE.get("model_dir"), pid=os.getpid())
+    print(f"[sessionlog] {os.path.relpath(logp, ROOT)}")
     if not args.no_camera:
         camera = _make_camera(args.source or (f"webcam:{args.camera}" if args.camera >= 0 else "webcam"))
         for _ in range(400):  # child imports torch/mediapipe first (~10-20 s)
             if camera.opened or camera.fatal: break
             time.sleep(0.1)
         print(f"[camera] opened={camera.opened} source={camera.source_info or camera.source}")
+        sessionlog.log("camera_opened", opened=camera.opened, fatal=camera.fatal, source=camera.source_info or str(camera.source))
     threading.Thread(target=_keep_warm, daemon=True).start()
+    threading.Thread(target=_link_monitor, daemon=True).start()
     def _prewarm_aligner():
         try:
             t = time.time(); prosody._aligner(); print(f"[prosody] MMS aligner ready in {time.time()-t:.1f}s")
