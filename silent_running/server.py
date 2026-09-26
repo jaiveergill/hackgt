@@ -25,7 +25,7 @@ app.mount("/static", StaticFiles(directory=STATIC), name="static")
 
 LLM_MARGIN = 3.0  # nats; an LLM proposal is accepted only if the visual model scores it within this of the raw top hypothesis
 PHRASE_GAP_THRESHOLD = 6.0  # nats; free transcript beating every phrase by more than this => "no phrase matched"
-STATE = {"mode": "phrase", "auto_listen": False, "auto_speak": True, "tts": "browser", "voice": None, "expressive": True, "emotion_override": None, "llm_enabled": True, "status": "idle", "utt_id": 0}
+STATE = {"mode": "phrase", "auto_listen": False, "auto_speak": True, "tts": "browser", "voice": None, "expressive": False, "emotion_override": None, "llm_enabled": True, "status": "idle", "utt_id": 0}
 clients = set()
 loop = None
 engine = camera = context = phrase_decoder = llm = None
@@ -406,6 +406,35 @@ def api_tts(text: str, voice: str = None, cached_only: int = 0):
     return Response(content=audio, media_type="audio/mpeg", headers={"X-TTS-Cached": str(cached), "X-TTS-Seconds": f"{secs:.2f}"})
 
 
+@app.get("/api/tts_stream")
+def api_tts_stream(text: str, voice: str = None, emotion: str = "neutral", intensity: float = 0.0):
+    """Uncached text: stream ElevenLabs audio to the browser as it is generated (first sound ~200 ms instead of waiting
+    for the whole clip), then cache the full clip for next time. Cached text is served whole."""
+    from fastapi.responses import Response
+    speaker = voice or STATE.get("voice")
+    vid = eltts.voice_for(speaker) if speaker else None
+    if not vid or not eltts.available():
+        return JSONResponse({"error": "no voice available"}, status_code=503)
+    if STATE.get("emotion_override"):
+        emotion, intensity = STATE["emotion_override"], max(intensity, 0.7)
+    plan = eltts.plan_delivery(text, emotion, intensity, 1.0)
+    path = eltts._cache_path(vid, text, plan["model"], plan["bucket"], 1.0)
+    if os.path.exists(path):
+        return Response(content=open(path, "rb").read(), media_type="audio/mpeg", headers={"X-TTS-Cached": "True"})
+    c = eltts._client()
+    def gen():
+        buf = []
+        try:
+            for chunk in c.text_to_speech.stream(voice_id=vid, text=plan["text"], model_id=plan["model"], output_format="mp3_44100_128",
+                                                 voice_settings=plan["settings"], optimize_streaming_latency=3):
+                buf.append(chunk); yield chunk
+        finally:
+            if buf:
+                os.makedirs(eltts.CACHE_DIR, exist_ok=True)
+                with open(path, "wb") as f: f.write(b"".join(buf))
+    return StreamingResponse(gen(), media_type="audio/mpeg", headers={"X-TTS-Cached": "False", "Cache-Control": "no-store"})
+
+
 @app.get("/api/say")
 def api_say(text: str, emotion: str = "neutral", intensity: float = 0.0, rate: float = 1.0, voice: str = None, retime: int = 1, utt_id: int = 0):
     """Expressive delivery: ElevenLabs (tag/stability/speed from emotion+intensity+rate) then per-word retiming to the
@@ -728,6 +757,12 @@ def main():
         except Exception as e:
             print("[prosody] aligner prewarm failed:", e)
     threading.Thread(target=_prewarm_aligner, daemon=True).start()
+    def _prewarm_tts():
+        try:
+            t = time.time(); eltts._client(); eltts.stock_voices(); print(f"[tts] ElevenLabs client warm in {time.time()-t:.1f}s")
+        except Exception as e:
+            print("[tts] warm failed:", e)
+    threading.Thread(target=_prewarm_tts, daemon=True).start()
     import uvicorn
     uvicorn.run(app, host="127.0.0.1", port=args.port, log_level="warning")
 

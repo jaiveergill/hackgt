@@ -135,7 +135,6 @@ details summary{cursor:pointer;color:var(--muted);font-size:12px;letter-spacing:
     <div class="cam">
       <img id="cam" src="/stream" alt="webcam">
       <div class="badge"><div class="dot" id="dot"></div><span id="track">looking for face…</span></div>
-      <div class="badge meter" id="meter" style="top:44px">expr <span>angry <b><i id="m_angry"></i></b></span><span>warm <b><i id="m_warm"></i></b></span><span>sad <b><i id="m_sad"></i></b></span></div>
       <div class="state idle" id="state">idle</div>
       <div class="hint">Face the camera. Hold <kbd>Listen</kbd> (or <kbd>space</kbd>) and mouth the phrase. It answers as soon as it is sure, often before you finish.</div>
     </div>
@@ -155,7 +154,6 @@ details summary{cursor:pointer;color:var(--muted);font-size:12px;letter-spacing:
       <label>voice <select id="voice"></select></label>
       <button class="btn" id="clonebtn" style="flex:0;white-space:nowrap;padding:8px 12px;font-size:13px">🎙 Clone my voice</button><span id="clonestat" class="small"></span>
       <label><input type="checkbox" id="autospeak" checked> speak automatically</label>
-      <label><input type="checkbox" id="expressive" checked> match my face and pace</label>
     </div>
   </div>
   <div class="col">
@@ -190,7 +188,6 @@ details summary{cursor:pointer;color:var(--muted);font-size:12px;letter-spacing:
     <div class="panel settings">
       <label><input type="checkbox" id="autolisten"> hands-free (auto-detect mouth movement)</label>
       <label><input type="checkbox" id="llm" checked> LLM propose + visual verify (Open Mode)</label>
-      <label>force emotion <select id="override"><option value="">from face</option><option>angry</option><option>warm</option><option>sad</option><option>surprised</option><option value="neutral">neutral</option></select></label>
       <details><summary>eval</summary><div class="row" style="margin-top:6px"><input class="txt" id="speaker" placeholder="speaker" style="width:120px"><button class="btn" id="save">Save last 6 s as sample of selected phrase</button></div></details>
     </div>
     <div class="panel">
@@ -209,10 +206,9 @@ details summary{cursor:pointer;color:var(--muted);font-size:12px;letter-spacing:
       <div class="lat" id="lat"></div>
     </div>
     <div class="panel" id="delivpanel">
-      <h3>Delivery · face sets the emotion, mouth sets the timing</h3>
+      <h3>Delivery</h3>
       <div id="deliv" class="small">No utterance yet.</div>
       <div class="strip" id="strip"></div>
-      <div class="replay" id="replay"></div>
     </div>
     <div class="panel" id="llmpanel" style="display:none">
       <h3>Contextual decoding · LLM proposes, visual model verifies</h3>
@@ -220,7 +216,7 @@ details summary{cursor:pointer;color:var(--muted);font-size:12px;letter-spacing:
     </div>
     <div class="panel">
       <h3>Pipeline</h3>
-      <div class="small mono">webcam → MediaPipe face + blendshapes (separate process) → per-frame 96×96 mouth crops streamed every 200 ms → Auto-AVSR conformer re-encode (MPS) → CTC scores for all 204 phrases + context prior → commit when ≥80% and the phrase's last token is out (often before the mouth stops) → pre-decoded Web Audio voice bank (~10 ms) · background: attention rescoring (top 16) + beam n-best → ElevenLabs v3 for strong emotion → MMS align → per-word retime</div>
+      <div class="small mono">webcam → MediaPipe face + blendshapes (separate process) → per-frame 96×96 mouth crops streamed every 200 ms → Auto-AVSR conformer re-encode (MPS) → CTC scores for all 204 phrases + context prior → commit when ≥80% and the phrase's last token is out (often before the mouth stops) → pre-decoded Web Audio voice bank (~5 ms; open-vocabulary text streams from ElevenLabs Flash) · background: attention rescoring (top 16) + beam n-best</div>
     </div>
   </div>
 </section>
@@ -241,9 +237,7 @@ function connect(){
   wsm.onmessage=e=>meta(JSON.parse(e.data));
 }
 function send(o){if(ws&&ws.readyState===1)ws.send(JSON.stringify(o))}
-function meterUpdate(m){const ex=m.expression||{};['angry','warm','sad'].forEach(e=>{const el=document.getElementById('m_'+e);if(el)el.style.width=Math.min(100,(ex[e]||0)*100)+'%';});}
 function meta(m){
-  meterUpdate(m);
   const d=$('#dot'),t=$('#track');
   if(m.listening){d.className='dot listen';}else d.className='dot'+(m.face?' ok':'');
   if(!m.face)t.textContent='no face — look at the camera';
@@ -252,7 +246,7 @@ function meta(m){
 }
 function setState(s,extra){const el=$('#state');el.className='state '+s;el.textContent=(s==='nurse_listening'?'nurse speaking':s)+(extra?' · '+extra:'');}
 function handle(m){
-  if(m.type==='hello'){phrases=m.phrases;phraseTable=m.phrase_table||[];applyCtx(m.context);mode=m.state.mode;syncMode();if(m.state.expressive!=null)$('#expressive').checked=m.state.expressive;
+  if(m.type==='hello'){phrases=m.phrases;phraseTable=m.phrase_table||[];applyCtx(m.context);mode=m.state.mode;syncMode();
     $('#nphr').textContent=phrases.length+' phrases';$('#phrlist').innerHTML=phrases.map(p=>`<span>${p}</span>`).join('');buildChips();(m.log||[]).forEach(addLog);
     fetch('/api/state').then(r=>r.json()).then(s=>{$('#engine').textContent=`${s.engine.model} · ${phrases.length} phrases`;});
     const v=$('#voice').value;if(v&&v.startsWith('clone:'))preloadBank(v.slice(6));}
@@ -279,9 +273,7 @@ function buildChips(){const cats=[...new Set(phraseTable.map(r=>r.category))];co
 function addLog(e){const L=$('#log');if(L.querySelector('.small'))L.innerHTML='';const d=document.createElement('div');d.className='msg '+e.who+(e.critical?' critical':'');const t=new Date(e.ts*1000).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
   d.innerHTML=`<span class="who">${e.who}</span><span class="t">${e.text}<span class="meta">${t}${e.confidence?` · ${fmtPct(e.confidence)}`:''}${e.emotion&&e.emotion!=='neutral'?` · ${e.emotion}`:''}</span></span>`;L.appendChild(d);L.scrollTop=L.scrollHeight;}
 function showAlert(m){$('#alerttext').textContent=m.text.toUpperCase();const a=$('#alert');a.classList.add('on');
-  const sp=$('#voice').value.startsWith('clone:')?$('#voice').value.slice(6):null;
-  if(sp&&bank.has(sp+'|'+m.text.toLowerCase())){speak(m.text,{emotion:'neutral',intensity:0,onended:()=>speak(m.text,{emotion:'urgent',forceRemote:true})});}
-  else{speak(m.text,{emotion:'urgent'});player.onended=()=>{player.onended=null;speak(m.text,{emotion:'urgent'});};}
+  speak(m.text,{onended:()=>speak(m.text)});
   clearTimeout(showAlert.t);showAlert.t=setTimeout(()=>a.classList.remove('on'),15000);}
 $('#alertok').onclick=()=>{$('#alert').classList.remove('on');};
 function renderPartial(m){
@@ -327,20 +319,15 @@ function render(m){
     $('#llmpanel').style.display=$('#llm').checked?'':'none';$('#llmout').innerHTML='<span class="small">LLM proposing a correction from the visual hypotheses + context; the visual model will verify it…</span>';
   }
   const L=m.latency;$('#lat').textContent=Object.entries(L).map(([k,v])=>`${k} ${(v*1000).toFixed(0)} ms`).join(' · ')+` · ${m.n_frames} frames (${m.duration.toFixed(1)} s)`;
-  $('#vitals').innerHTML=`<span>latency <b>${(L.total*1000).toFixed(0)} ms</b></span><span>face <b>${(m.expression||{}).emotion||'neutral'}</b></span><span>mouthed <b>${m.timing?m.timing.duration.toFixed(2)+' s':'—'}</b></span><span>mode <b>${m.mode}</b></span>`;
+  $('#vitals').innerHTML=`<span>latency <b>${(L.total*1000).toFixed(0)} ms</b></span><span>mouthed <b>${m.timing?m.timing.duration.toFixed(2)+' s':'—'}</b></span><span>mode <b>${m.mode}</b></span>`;
 }
 function renderDelivery(m){
-  const ex=m.expression||{emotion:'neutral',intensity:0},tm=m.timing;
-  let h=`<span class="pill ${ex.emotion==='neutral'?'':'ctx'}">face: ${ex.emotion}${ex.intensity?` ${(ex.intensity*100).toFixed(0)}%`:''}</span>`;
-  if(ex.scores)h+=` <span class="small">${Object.entries(ex.scores).map(([k,v])=>`${k} ${v.toFixed(2)}`).join(' · ')}</span>`;
-  if(tm)h+=` <span class="pill">mouthed ${tm.duration.toFixed(2)} s · rate ${tm.rate.toFixed(2)}x${tm.pauses.length?` · ${tm.pauses.length} pause${tm.pauses.length>1?'s':''}`:''}</span>`;else h+=` <span class="small">no word timing</span>`;
+  const tm=m.timing;let h=tm?`<span class="pill">mouthed ${tm.duration.toFixed(2)} s · ${tm.words.length} words</span>`:`<span class="small">no word timing</span>`;
   h+=`<div id="delivrep" class="small" style="margin-top:4px">synthesis pending…</div>`;$('#deliv').innerHTML=h;
   const st=$('#strip');st.innerHTML='';
   if(tm&&tm.words.length){const t0=tm.words[0].start,T=Math.max(tm.words[tm.words.length-1].end-t0,0.1);
-    st.innerHTML=`<div class="lbl">mouthed (video)</div><div class="row2" id="rowv"></div><div class="lbl">delivered (audio)</div><div class="row2" id="rowa"></div>`;
+    st.innerHTML=`<div class="lbl">mouthed (video)</div><div class="row2" id="rowv"></div>`;
     const rv=$('#rowv');tm.words.forEach((w,i)=>{const e=document.createElement('span');e.style.left=((w.start-t0)/T*100)+'%';e.style.width=((w.end-w.start)/T*100)+'%';e.style.background=i%2?'#39d98a':'#7fe7b3';e.textContent=w.word;rv.appendChild(e);});}
-  const rp=$('#replay');rp.innerHTML='<span class="small" style="line-height:28px">replay as:</span>';
-  [['neutral',0],['angry',0.9],['warm',0.9],['sad',0.8]].forEach(([e,i])=>{const b=document.createElement('button');b.textContent=e;b.onclick=()=>speak(m.selected,{emotion:e,intensity:i});rp.appendChild(b);});
 }
 function renderAudioStrip(rep){const ra=$('#rowa');if(!ra||!rep||!rep.audio_words||!rep.audio_words.length)return;const aw=rep.audio_words,t0=aw[0].start,T=Math.max(aw[aw.length-1].end-t0,0.1);ra.innerHTML='';aw.forEach((w,i)=>{const e=document.createElement('span');e.style.left=((w.start-t0)/T*100)+'%';e.style.width=((w.end-w.start)/T*100)+'%';e.style.background=i%2?'#4ea1ff':'#8fc4ff';e.textContent=w.word+(rep.ratios&&Math.abs(rep.ratios[i]-1)>0.05?` ×${rep.ratios[i]}`:'');ra.appendChild(e);});}
 function renderNbest(nb,intoCands){
@@ -368,7 +355,8 @@ speechSynthesis.onvoiceschanged=()=>{loadVoices();loadCloned();};loadVoices();se
 let cloned=[];const player=new Audio();
 // ---------- instant playback: every phrase pre-decoded into a Web Audio buffer for the selected voice
 const actx=new (window.AudioContext||window.webkitAudioContext)({latencyHint:'interactive'});
-const bank=new Map();let bankVoice=null,bankLoading=null;
+const bank=new Map();let bankVoice=null;
+function bankKey(sp,text){return sp+'|'+text.toLowerCase();}
 function unlockAudio(){if(actx.state!=='running')actx.resume().catch(()=>{});}
 window.addEventListener('pointerdown',unlockAudio,{capture:true});window.addEventListener('keydown',unlockAudio,{capture:true});
 async function preloadBank(sp){
@@ -377,7 +365,7 @@ async function preloadBank(sp){
   let done=0,fail=0;const t0=performance.now();const misses=[];
   const stat=(phase)=>{$('#bankstat').textContent=`voice bank · ${bank.size}/${phrases.length} instant${phase?` · ${phase}`:''}`;};
   const load=async(ph,cachedOnly)=>{try{const r=await fetch(`/api/tts?text=${encodeURIComponent(ph)}&voice=${encodeURIComponent(sp)}${cachedOnly?'&cached_only=1':''}`);
-      if(r.status===404&&cachedOnly){misses.push(ph);return;}if(!r.ok)throw 0;const buf=await actx.decodeAudioData(await r.arrayBuffer());bank.set(sp+'|'+ph.toLowerCase(),buf);}catch(e){fail++;}};
+      if(r.status===404&&cachedOnly){misses.push(ph);return;}if(!r.ok)throw 0;bank.set(bankKey(sp,ph),await actx.decodeAudioData(await r.arrayBuffer()));}catch(e){fail++;}};
   const run=async(list,n,cachedOnly)=>{const todo=list.slice();const w=async()=>{while(todo.length&&bankVoice===sp){await load(todo.shift(),cachedOnly);done++;if(done%10===0)stat(cachedOnly?'loading':'synthesizing misses');}};await Promise.all(Array.from({length:n},w));};
   await run(phrases,8,true);stat(misses.length?`${misses.length} to synthesize`:`ready in ${((performance.now()-t0)/1000).toFixed(1)} s`);
   if(misses.length){await run(misses,2,false);if(bankVoice===sp)stat(`ready${fail?` (${fail} failed)`:''}`);}
@@ -387,19 +375,16 @@ function playBuffer(buf){unlockAudio();if(curSrc){try{curSrc.stop()}catch(e){}}p
 function speakBrowser(text){speechSynthesis.cancel();const u=new SpeechSynthesisUtterance(text);const v=voices.list.find(v=>v.name==='Samantha')||voices.list[0];if(v)u.voice=v;speechSynthesis.speak(u);$('#err').textContent='ElevenLabs unavailable, used browser voice';}
 function speak(text,opts){if(!text)return;const sel=$('#voice').value;opts=opts||{};
   if(sel.startsWith('clone:')){const sp=sel.slice(6);player.pause();
-    const ex=(opts.expression)||(last&&last.expression)||{emotion:'neutral',intensity:0};const tm=(last&&last.timing)||{};
-    let emo=opts.emotion||ex.emotion||'neutral',inten=opts.intensity!=null?opts.intensity:(ex.intensity||0),rate=tm.rate||1;
-    if(emo==='urgent'){emo='angry';inten=0.7;rate=1.1;}
-    const expressive=$('#expressive').checked;
-    // instant path: pre-decoded neutral buffer (the server would pick neutral Flash for these anyway, or the emotion is mild)
-    const buf=bank.get(sp+'|'+text.toLowerCase());
-    if(buf&&!opts.forceRemote&&(!expressive||emo==='neutral'||inten<0.5)){const t=performance.now();const src=playBuffer(buf);
-      if(opts.onended)src.onended=opts.onended;
-      const d=$('#delivrep');if(d)d.textContent=`played from voice bank in ${(performance.now()-t).toFixed(0)} ms (pre-synthesized, neutral)`;
+    const buf=bank.get(bankKey(sp,text));
+    if(buf){const t=performance.now();const src=playBuffer(buf);if(opts.onended)src.onended=opts.onended;
+      const d=$('#delivrep');if(d)d.textContent=`played from voice bank in ${(performance.now()-t).toFixed(0)} ms (pre-synthesized)`;
       if(!$('#conf').querySelector('.voicepill'))$('#conf').insertAdjacentHTML('beforeend',`<span class="pill ctx voicepill">voice: ${sp} · instant</span>`);return;}
-    const url=expressive?`/api/say?text=${encodeURIComponent(text)}&emotion=${emo}&intensity=${inten}&rate=${rate}&voice=${encodeURIComponent(sp)}&utt_id=${last?last.utt_id:0}&_=${Date.now()}`:`/api/tts?text=${encodeURIComponent(text)}&voice=${encodeURIComponent(sp)}&_=${Date.now()}`;
-    player.src=url;player.onerror=()=>{speakBrowser(text);};player.play().catch(e=>{if(e&&e.name==='NotAllowedError'){$('#err').textContent='Click anywhere on the page once to enable audio, then try again.';}else speakBrowser(text);});
-    if(!$('#conf').querySelector('.voicepill'))$('#conf').insertAdjacentHTML('beforeend',`<span class="pill ctx voicepill">voice: ${sp}</span>`);}
+    // not banked (open-vocabulary text): stream it; the <audio> element starts on the first chunk
+    player.src=`/api/tts_stream?text=${encodeURIComponent(text)}&voice=${encodeURIComponent(sp)}&_=${Date.now()}`;
+    if(opts.onended)player.onended=()=>{player.onended=null;opts.onended();};
+    player.onerror=()=>speakBrowser(text);player.play().catch(e=>{if(e&&e.name==='NotAllowedError'){$('#err').textContent='Click anywhere on the page once to enable audio, then try again.';}else speakBrowser(text);});
+    const d=$('#delivrep');if(d)d.textContent='streaming from ElevenLabs (not in the bank yet)';
+    if(!$('#conf').querySelector('.voicepill'))$('#conf').insertAdjacentHTML('beforeend',`<span class="pill ctx voicepill">voice: ${sp} · streamed</span>`);}
   else speakBrowser(text);}
 function loadCloned(){fetch('/api/voices').then(r=>r.json()).then(j=>{cloned=j.voices||[];const sel=$('#voice');const add=(val,label)=>{if(![...sel.options].some(o=>o.value===val)){const o=document.createElement('option');o.value=val;o.textContent=label;sel.insertBefore(o,sel.firstChild);}};(j.stock||[]).slice().reverse().forEach(v=>add('clone:'+v.name,`☁ ${v.name} (ElevenLabs)`));cloned.forEach(v=>add('clone:'+v.speaker,`🎙 ${v.speaker} (my voice)`));if(j.selected&&j.available){sel.value='clone:'+j.selected;}const v=sel.value;if(v&&v.startsWith('clone:')&&phrases.length)preloadBank(v.slice(6));});}
 $('#voice').addEventListener('change',e=>{const v=e.target.value;send({cmd:'settings',voice:v.startsWith('clone:')?v.slice(6):null});if(v.startsWith('clone:'))preloadBank(v.slice(6));});
@@ -419,9 +404,7 @@ $('#nursetext').addEventListener('keydown',e=>{if(e.key==='Enter')$('#nursesend'
 document.querySelectorAll('#tabs button').forEach(b=>b.onclick=()=>{document.querySelectorAll('#tabs button').forEach(x=>x.classList.toggle('on',x===b));document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('on',t.id==='tab-'+b.dataset.tab));});
 document.querySelectorAll('#mode button').forEach(b=>b.onclick=()=>{mode=b.dataset.mode;send({cmd:'mode',mode});syncMode();});
 $('#autospeak').onchange=e=>send({cmd:'settings',auto_speak:e.target.checked,tts:'browser'});
-$('#expressive').onchange=e=>send({cmd:'settings',expressive:e.target.checked});
 $('#llm').onchange=e=>send({cmd:'settings',llm_enabled:e.target.checked});
-$('#override').onchange=e=>send({cmd:'settings',emotion_override:e.target.value||null});
 $('#autolisten').onchange=e=>{send({cmd:'settings',auto_listen:e.target.checked});lb.style.opacity=e.target.checked?.45:1;lb.innerHTML=e.target.checked?'HANDS-FREE · just mouth a phrase<small>auto-detects mouth movement · or hold to force</small>':'HOLD TO LISTEN<small>or hold the space bar · hands-free available in Dev</small>';};
 let ctxT;function pushCtx(){clearTimeout(ctxT);ctxT=setTimeout(()=>send({cmd:'context',notes:$('#notes').value,category:$('#category').value,last_prompt:$('#prompt').value}),250)}
 ['#notes','#prompt'].forEach(s=>$(s).addEventListener('input',pushCtx));$('#category').addEventListener('change',()=>{curCategory=$('#category').value;document.querySelectorAll('#chips button').forEach(x=>x.classList.toggle('on',x.textContent===curCategory));pushCtx();});

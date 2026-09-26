@@ -14,14 +14,23 @@ V3_MODEL = "eleven_v3"
 TAGS = {"angry": ("[angry]", "[shouting]"), "warm": ("[warm]", "[cheerful]"), "sad": ("[sad]", "[sad] [whispers]"), "surprised": ("[surprised]", "[gasps] [surprised]")}
 
 
+_CLIENT = None
+
+
 def _client():
+    """One client per process: keeps the HTTPS connection pool warm (a fresh client per request paid a TLS handshake each time,
+    and the very first use after startup paid ~2 s of imports + handshake on the demo path)."""
+    global _CLIENT
+    if _CLIENT is not None:
+        return _CLIENT
     from dotenv import load_dotenv
     load_dotenv(os.path.join(ROOT, ".env"))
     key = os.environ.get("ELEVENLABS_API_KEY") or os.environ.get("ELEVEN_LABS_API_KEY", "")
     if not key:
         return None
     from elevenlabs.client import ElevenLabs
-    return ElevenLabs(api_key=key)
+    _CLIENT = ElevenLabs(api_key=key)
+    return _CLIENT
 
 
 def available():

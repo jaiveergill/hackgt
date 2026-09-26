@@ -93,13 +93,13 @@ class FaceLandmarker:
     NOSE_TIP = [1, 4]
     MOUTH = [61, 291, 0, 17, 13, 14, 78, 308]
 
-    def __init__(self, model_path=MODEL):
+    def __init__(self, model_path=MODEL, blendshapes=True):
         import mediapipe as mp
         from mediapipe.tasks import python as mpp
         from mediapipe.tasks.python import vision
         opts = vision.FaceLandmarkerOptions(base_options=mpp.BaseOptions(model_asset_path=model_path),
                                             running_mode=vision.RunningMode.VIDEO, num_faces=1,
-                                            output_face_blendshapes=True, output_facial_transformation_matrixes=False,
+                                            output_face_blendshapes=blendshapes, output_facial_transformation_matrixes=False,
                                             min_face_detection_confidence=0.5, min_tracking_confidence=0.5)
         self.lm = vision.FaceLandmarker.create_from_options(opts)
         self.mp = mp

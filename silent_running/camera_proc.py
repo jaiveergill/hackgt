@@ -154,9 +154,8 @@ def _worker(conn, index, width, height, preview_width, buffer_seconds):
     import cv2
     sys.path.insert(0, ROOT); sys.path.insert(0, os.path.join(ROOT, "third_party", "chaplin"))
     from pipelines.detectors.mediapipe.video_process import VideoProcess  # cv2/skimage only, no torch
-    from silent_running.expression import FaceLandmarker, ExpressionTracker
-    fl = FaceLandmarker()
-    expr = ExpressionTracker()
+    from silent_running.expression import FaceLandmarker
+    fl = FaceLandmarker(blendshapes=False)   # no expression tracking on this branch: landmarks only, cheaper per frame
     class _Det:  # adapter so the probing code below keeps working
         def detect(self, frames, _):
             return [fl(f)[0] for f in frames]
@@ -217,7 +216,7 @@ def _worker(conn, index, width, height, preview_width, buffer_seconds):
 
     def emit(start, end, tag):
         nonlocal cropper, sent_rois
-        expression = expr.finish()
+        expression = None
         c, cropper = cropper, None
         if c is None or len(c.items) < 8:
             conn.send(("utterance", None, 0, len(c.items) if c else 0, 0.0, "too short", 0.0, tag)); return
@@ -239,7 +238,7 @@ def _worker(conn, index, width, height, preview_width, buffer_seconds):
         while conn.poll():
             cmd = conn.recv()
             if cmd[0] == "start":
-                listen_start = time.time(); expr.start(); just_committed = False; begin(listen_start)
+                listen_start = time.time(); just_committed = False; begin(listen_start)
             elif cmd[0] == "stop":
                 start, listen_start = listen_start, None
                 if start is None:
@@ -247,7 +246,7 @@ def _worker(conn, index, width, height, preview_width, buffer_seconds):
                 emit(start, time.time(), "manual")
             elif cmd[0] == "finish":   # parent committed early on the streamed crops: end the utterance now
                 tag = "manual" if listen_start is not None else "auto"
-                listen_start = None; auto_start = active_since = quiet_since = None; cropper = None; expr.finish()
+                listen_start = None; auto_start = active_since = quiet_since = None; cropper = None
                 just_committed = True
                 conn.send(("finished", tag))
             elif cmd[0] == "auto":
@@ -274,7 +273,6 @@ def _worker(conn, index, width, height, preview_width, buffer_seconds):
         except Exception as e:
             print("[camera] detect failed:", e); lm, bs = None, None
         buffer.append((ts, rgb, lm))
-        expr.update(bs, listen_start is not None or auto_start is not None)
         if cropper is not None:
             try:
                 cropper.feed(ts, rgb, lm)
@@ -310,7 +308,7 @@ def _worker(conn, index, width, height, preview_width, buffer_seconds):
                 if energy > on_thr:
                     active_since = active_since or ts
                     if ts - active_since >= MIN_ACTIVE:
-                        auto_start = active_since - PRE_ROLL; quiet_since = None; expr.start(); begin(auto_start)
+                        auto_start = active_since - PRE_ROLL; quiet_since = None; begin(auto_start)
                 else:
                     active_since = None
             else:
@@ -357,8 +355,7 @@ def _worker(conn, index, width, height, preview_width, buffer_seconds):
         frame = cv2.flip(frame, 1)
         ok, jpg = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 70])
         meta = {"face": face, "fps": round(fps, 1), "frame_w": w, "frame_h": h, "bbox": bbox, "face_frac": round(face_frac, 3), "listening": listening, "n_frames": n_listen,
-                "auto": auto, "energy": round(energy, 2), "noise": round(noise or 0.0, 2), "mouth_active": bool(auto_start is not None),
-                "expression": expr.live_meta()}
+                "auto": auto, "energy": round(energy, 2), "noise": round(noise or 0.0, 2), "mouth_active": bool(auto_start is not None)}
         if ok:
             conn.send(("preview", jpg.tobytes(), meta))
       except (BrokenPipeError, EOFError):
