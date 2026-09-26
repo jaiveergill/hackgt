@@ -1,0 +1,25 @@
+# Python 3.12. Known-good versions on Apple Silicon (M2, macOS 15). Install: uv pip install -r requirements.txt
+torch==2.14.0
+torchvision==0.29.0
+torchaudio==2.11.0
+pytorch-lightning==2.6.6
+sentencepiece==0.2.2
+av==18.1.0
+mediapipe==0.10.21
+opencv-python==4.11.0.86
+numpy==1.26.4
+scipy==1.17.1
+scikit-image==0.26.0
+gdown==6.4.0
+huggingface-hub==2.0.0
+fastapi==0.141.1
+uvicorn[standard]==0.54.0
+python-multipart==0.0.32
+websockets==17.1
+python-dotenv==1.2.3
+openai==3.19.2
+elevenlabs==2.69.0
+httpx==0.28.1
+# expressive delivery (prosody.py): wav I/O and time-stretch; pyrubberband is optional (needs the rubberband binary)
+soundfile==0.14.0
+audiotsm==0.1.2
