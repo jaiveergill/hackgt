@@ -38,13 +38,19 @@ Voice output: browser voices by default; with `ELEVEN_LABS_API_KEY` in `.env` th
   the proposal, the verdict and the score gap. Raw model output is always displayed. Measured on a captioned TED clip:
   WER 0.273 raw, 0.227 after verified correction (`plans/PLAN_1_LLM_CONTEXT.md`).
 * **Expressive delivery** (`plans/PLAN_4_EXPRESSIVE_DELIVERY.md`): with an ElevenLabs voice selected, your face sets the emotion
-  (MediaPipe blendshapes -> angry / warm / sad / surprised + intensity -> v3 audio tag + stability) and your mouth sets the
-  timing (CTC forced alignment on the lip-reading model -> per-word durations and pauses -> speed setting + per-word retiming of
-  the returned audio). The delivery panel shows mouthed-vs-delivered word strips and "replay as" buttons for side-by-side judging.
+  ("match my face": MediaPipe blendshapes -> angry / warm / sad / surprised + intensity -> v3 audio tag + stability), and with
+  "match my pace" (off by default: aligning the audio delays the voice, `plans/PLAN_5_LATENCY.md`) your mouth sets the timing
+  (CTC forced alignment on the lip-reading model -> per-word durations and pauses -> speed setting + per-word retiming of the
+  returned audio). Neutral speech at the natural pace plays from a voice bank the page decodes when the voice is picked (every
+  phrase the server has cached); other text streams from ElevenLabs as it is generated (`/api/tts_stream`).
+  The delivery panel shows mouthed-vs-delivered word strips and "replay as" buttons for side-by-side judging.
   Clone your own voice from a recording session with `POST /api/voice/clone?speaker=<name>` (Creator tier or higher).
 * **Context panel**: what the nurse just asked (yes/no questions boost Yes/No), a patient category, free-text
   notes (keyword overlap boosts phrases), and recent history. Context only re-weights VSR-supported candidates.
 * **Eval drawer**: save the last 6 s of webcam as a labelled sample for `scripts/eval.py`.
+* **Hands-free listening** ends an utterance once the mouth has been still for 0.35 s (`SR_AUTO_HANG` to change it;
+  `scripts/eval_hang.py` measures splits and false triggers per value). Latency, measured end to end with
+  `scripts/eval_latency.py`: `plans/PLAN_5_LATENCY.md`.
 
 ## Tips that matter for accuracy
 
