@@ -13,7 +13,7 @@ from fastapi.staticfiles import StaticFiles
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
-from silent_running.vsr import VSREngine, PREFILTER, load_phrases, load_phrase_table, _read_video
+from silent_running.vsr import VSREngine, load_phrases, load_phrase_table, _read_video
 from silent_running.camera_proc import CameraProcess
 from silent_running.signals.aggregate import nonverbal_dict
 from silent_running.context import ContextStore, OpenAIChooser
@@ -399,39 +399,46 @@ def stream():
     return StreamingResponse(mjpeg(), media_type="multipart/x-mixed-replace; boundary=frame")
 
 
+def _voice_id(voice):
+    """The ElevenLabs voice id of `voice` (default: the selected voice), or None without a voice or an API key."""
+    speaker = voice or STATE.get("voice")
+    vid = eltts.voice_for(speaker) if speaker else None
+    return vid if vid and eltts.available() else None
+
+
+def _mp3(audio, cached, **headers):
+    from fastapi.responses import Response
+    return Response(content=audio, media_type="audio/mpeg", headers={"X-TTS-Cached": str(cached), **headers})
+
+
 @app.get("/api/tts")
 def api_tts(text: str, voice: str = None, cached_only: int = 0):
     """Cloned-voice speech (Plan 3). Returns MP3; 503 if no ElevenLabs key or voice so the UI falls back to the browser voice.
     cached_only=1: 404 instead of synthesizing (the UI's voice bank loads what the server already has, at no ElevenLabs cost)."""
-    from fastapi.responses import Response
-    speaker = voice or STATE.get("voice")
-    vid = eltts.voice_for(speaker) if speaker else None
-    if not vid or not eltts.available():
+    vid = _voice_id(voice)
+    if not vid:
         return JSONResponse({"error": "no cloned voice available"}, status_code=503)
     if cached_only:
         audio = eltts.cached(text, vid)
-        if audio is None:
-            return JSONResponse({"error": "not cached"}, status_code=404)
-        return Response(content=audio, media_type="audio/mpeg", headers={"X-TTS-Cached": "True"})
+        return _mp3(audio, True) if audio is not None else JSONResponse({"error": "not cached"}, status_code=404)
     try:
         audio, cached, secs = eltts.synth(text, vid)
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=502)
-    return Response(content=audio, media_type="audio/mpeg", headers={"X-TTS-Cached": str(cached), "X-TTS-Seconds": f"{secs:.2f}"})
+    return _mp3(audio, cached, **{"X-TTS-Seconds": f"{secs:.2f}"})
 
 
 @app.get("/api/tts_stream")
 def api_tts_stream(text: str, voice: str = None):
     """/api/tts for text that is not cached, streamed: the browser starts playing on the first chunk instead of after the
-    whole clip. Cached text is served whole. An upstream failure is logged and shown; the UI then falls back."""
-    from fastapi.responses import Response
-    speaker = voice or STATE.get("voice")
-    vid = eltts.voice_for(speaker) if speaker else None
-    if not vid or not eltts.available():
+    whole clip. Cached text is served whole. An upstream failure is logged and shown as an error; the stream then aborts:
+    before any audio the UI falls back to the browser voice, after it the patient hears the phrase cut short."""
+    vid = _voice_id(voice)
+    if not vid:
         return JSONResponse({"error": "no cloned voice available"}, status_code=503)
     audio = eltts.cached(text, vid)
     if audio is not None:
-        return Response(content=audio, media_type="audio/mpeg", headers={"X-TTS-Cached": "True"})
+        return _mp3(audio, True)
     def gen():
         try:
             yield from eltts.synth_stream(text, vid)
@@ -447,9 +454,8 @@ def api_say(text: str, emotion: str = "neutral", intensity: float = 0.0, rate: f
     """Expressive delivery: ElevenLabs (tag/stability/speed from emotion+intensity+rate) then per-word retiming to the
     mouthed word durations of utterance `utt_id` (if it is the last one). Returns WAV + X-Delivery header with the report."""
     from fastapi.responses import Response
-    speaker = voice or STATE.get("voice")
-    vid = eltts.voice_for(speaker) if speaker else None
-    if not vid or not eltts.available():
+    vid = _voice_id(voice)
+    if not vid:
         return JSONResponse({"error": "no ElevenLabs voice available"}, status_code=503)
     if STATE.get("emotion_override"):
         emotion, intensity = STATE["emotion_override"], max(intensity, 0.7)
@@ -467,7 +473,7 @@ def api_say(text: str, emotion: str = "neutral", intensity: float = 0.0, rate: f
     if not (retime and timing and timing.get("words")):  # nothing to retime: the clip as synthesized, no mp3 -> wav decode
         report["total"] = round(time.time() - t0, 2)
         broadcast({"type": "delivery", "utt_id": utt_id, **report})
-        return Response(content=mp3, media_type="audio/mpeg", headers={"X-Delivery": json.dumps({k: v for k, v in report.items() if k != "retime"})})
+        return _mp3(mp3, cached, **{"X-Delivery": json.dumps({k: v for k, v in report.items() if k != "retime"})})
     wav, sr = prosody.mp3_to_wav(mp3)
     t1 = time.time()
     try:
@@ -939,7 +945,7 @@ def main():
     STATE["model_dir"] = os.path.relpath(args.model_dir, ROOT) if args.model_dir else "models/LRS3_V_WER19.1"
     if args.voice:
         STATE["voice"] = args.voice
-    engine.warmup(shortlist=min(PREFILTER, len(phrases)))  # the batch the phrase scorer runs for this inventory
+    engine.warmup(phrases)
     print(f"[engine] loaded + warmed in {time.time()-t0:.1f}s (encoder on {engine.device}, decoder on {engine.decode_device}, phrase scoring on {engine.score_device})")
     context = ContextStore()
     phrase_decoder = PhraseDecoder(engine, phrases, context, gamma=args.gamma)

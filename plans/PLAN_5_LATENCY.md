@@ -34,7 +34,7 @@ Where the 0.43 s to the decision comes from:
   attention decoder on the GPU instead of the CPU (+258 MB of GPU memory). `scripts/check_scorer.py`: same phrase selected
   on 400/400 MIRACL clips without a profile and 240/240 with an enrolled profile (including phrases outside the shortlist that
   the profile supports), scores within 2e-5 nats; decode 98 -> 68 ms offline. Every new shape on the GPU compiles kernels
-  (0.1-0.7 s once), so calls are padded to a few shapes that `warmup()` compiles at startup (+6 s): 0 stalls in 96 first calls.
+  (0.1-0.7 s once), so calls are padded to a few shapes that `warmup()` compiles at startup (+8 s): no first call over 100 ms slower than its repeat in 128.
   The prefilter stays at 48: fast-path's 16 cost 3.5 points of top-1 (review, 397 MIRACL clips).
 - **Mouth crops computed while mouthing** (`camera_proc.IncrementalCropper`): ~0.012 s. `scripts/check_cropper.py`: identical
   crops to the old batch crop, pixel for pixel, on 405 clips x 5 cases (manual, hands-free with frames past the end, landmark

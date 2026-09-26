@@ -122,24 +122,29 @@ class VSREngine:
                 torch.mps.synchronize()
         return enc
 
-    def warmup(self, n_frames=50, shortlist=PREFILTER):
+    def warmup(self, phrases=(), n_frames=50):
         """Run the live path's kernels once. On the GPU, every new shape of a phrase-scoring call builds and compiles its
-        kernels (0.1-0.7 s once, measured); _score_phrases_full pads its calls to a few shapes, all of which run here:
-        the free transcript (batch 1) and a shortlist of `shortlist` phrases (plus a few enrolled ones outside it) for
-        utterances up to 7 s. That adds ~6 s to startup (M2)."""
+        kernels (0.1-0.7 s once, measured); _score_phrases_full pads its calls to a few shapes, and these run here for
+        utterances up to 7 s: the free transcript (batch 1), a check of a few texts (batch 2-8, Open Mode's LLM proposal),
+        and with the phrase inventory, its shortlist (plus up to 7 enrolled phrases outside it) at its phrase lengths.
+        That adds ~8 s to startup (M2)."""
         x = torch.zeros(1, n_frames, 88, 88)
         enc = self.encode(x)
         self.ctc_greedy(enc)
         self.score_phrases(enc, ["warm up"])
         if self.score_device.type != "mps":
             return
+        shortlist = min(PREFILTER, len(phrases))
+        longest = max((len(self.tokenize(p)) for p in phrases), default=0) + 1
+        text = lambda L: " ".join(["A"] * (L - 1))  # "A A ... A" is L - 1 tokens
         for T in range(16, 177, 16):  # encoder frames (25 fps)
             e = torch.zeros(T, enc.shape[1])
-            for L in range(8, 49, 8):  # "A A ... A" is L - 1 tokens
-                self._score_phrases_full(e, [" ".join(["A"] * (L - 1))])
-            for B in (shortlist, shortlist + 1):
-                for L in (8, 16):
-                    self._score_phrases_full(e, [" ".join(["A"] * (L - 1))] * B)
+            for L in range(8, 49, 8):
+                self._score_phrases_full(e, [text(L)])
+                self._score_phrases_full(e, [text(L)] * 2)
+            for B in ((shortlist, shortlist + 1) if shortlist else ()):
+                for L in range(8, _round_up(longest, 8) + 1, 8):
+                    self._score_phrases_full(e, [text(L)] * B)
 
     def _ids_to_text(self, ids):
         return "".join(self.token_list[i] for i in ids if i not in (0, self.eos)).replace("▁", " ").strip()

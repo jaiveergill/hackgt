@@ -10,7 +10,7 @@ then GPU scorer, and compares:
   2. with a profile per speaker (enrollment evidence, PR #5: takes 1..K of every phrase enrolled, the later takes decoded),
      so enrolled phrases outside the shortlist (`always=`) go through the GPU scorer too.
 Timing: PhraseDecoder.decode per clip on each scorer (median / p90 / max), and first-call stalls after warmup (a first
-call on a new shape that takes over 40 ms longer than repeating it). Prints expected vs actual; exit 1 on a failure.
+call on a new shape that takes over 100 ms longer than repeating it). Prints expected vs actual; exit 1 on a failure.
 """
 import argparse, fcntl, os, sys, tempfile, time, shutil
 import numpy as np
@@ -85,13 +85,13 @@ def stalls(engine, inventory):
     bad, n = [], 0
     for T in range(11, 170, 5):
         enc = torch.randn(T, 768)
-        for c in ([" ".join(words[:random.randint(1, len(words))])], random.sample(inventory, 48), random.sample(inventory, 50)):
+        for c in ([" ".join(words[:random.randint(1, len(words))])], random.sample(inventory, 2), random.sample(inventory, 48), random.sample(inventory, 50)):
             a = time.time(); engine._score_phrases_full(enc, c); a = time.time() - a
             b = time.time(); engine._score_phrases_full(enc, c); b = time.time() - b
             n += 1
-            if a > b + 0.04:
+            if a > b + 0.1:  # a kernel compile costs 0.1-0.7 s; smaller gaps are scheduling noise on a loaded machine
                 bad.append((T, len(c), round(a * 1000), round(b * 1000)))
-    check(not bad, "no first-call stall after warmup (first call > repeat + 40 ms)", f"0/{n}", f"{len(bad)}/{n} {bad}")
+    check(not bad, "no first-call stall after warmup (first call > repeat + 100 ms)", f"0/{n}", f"{len(bad)}/{n} {bad}")
 
 
 def main():
@@ -108,7 +108,7 @@ def main():
     inv204 = load_phrases()
     inventory = inv204 + [p for p in miracl if p.lower() not in {q.lower() for q in inv204}]
     engine = VSREngine()
-    t = time.time(); engine.warmup(); print(f"warmup {time.time() - t:.1f}s, score device {engine.score_device}", flush=True)
+    t = time.time(); engine.warmup(inventory); print(f"warmup {time.time() - t:.1f}s, score device {engine.score_device}", flush=True)
     check(engine.score_device.type == "mps", "phrase scorer on the GPU", "mps", engine.score_device.type)
     scorer = Scorer(engine)
     dec = PhraseDecoder(engine, inventory, ContextStore())
