@@ -20,8 +20,8 @@ Budget holds with about 1 s spare.
 - `/api/say`: synth -> MMS alignment of the audio -> per-word stretch with clamped global factor -> WAV; broadcasts a delivery
   report. UI: delivery panel, mouthed-vs-delivered strips, `Replay as` buttons, expressive toggle, emotion override.
 - Measured (TED clip "I'm going to make a lot of hand gestures", mouthed span 1.36 s): neutral delivery 1.34 s after retiming;
-  v3 angry/warm cached 1.1 to 1.3 s wall including 1.1 s alignment+stretch; first alignment call 7 s (model load, now prewarmed
-  at server start). Uncached v3 synth varied 0.7 to 7.7 s across the evening; the pre-synthesized phrase bank is the mitigation.
+  v3 angry/warm cached 1.1 to 1.3 s wall including 1.1 s alignment+stretch; first alignment call 7 s (model load, now done when
+  "match my pace" is switched on). Uncached v3 synth varied 0.7 to 7.7 s across the evening; the pre-synthesized phrase bank is the mitigation.
 - Cloning: works via REST (SDK 2.69 `labels` bug); test clone synthesized in 0.8 s and was deleted.
 - Remaining: recording session -> real clone -> expression calibration on the expression pass -> blind test (step 5).
 

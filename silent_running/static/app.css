@@ -55,6 +55,7 @@ details[open] summary{margin-bottom:10px}
 .badge.meter{top:auto;bottom:44px;left:12px}
 .badge.handsbadge{top:48px;color:var(--muted)}.badge.handsbadge.off{color:var(--bad)}
 .badge[hidden]{display:none}
+.mouthpx.ok{color:var(--ok)}.mouthpx.low{color:var(--confirm)}
 .dot{width:10px;height:10px;border-radius:50%;background:var(--bad);color:var(--bad)}
 .dot.ok{background:var(--lips)}
 .dot.rec{background:var(--fused);color:var(--fused);animation:pulse 1s infinite}

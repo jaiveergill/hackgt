@@ -11,8 +11,11 @@ Spec strings (server `--source`):
                     stream:172.20.10.2 = that host's :81/stream with framesize=9 (HVGA) and quality=16 applied on every (re)open
                     via the board's /control endpoint. HVGA q16 ~19 fps without dropouts on a phone hotspot; q10 saturated the
                     link (0.5-1 s gaps, 480 ms ping spikes); VGA runs at 6 fps on this board.
+  stream:172.20.10.2?window=2x   the same, the sensor reading only the centre half of its view: 1.67x the pixels across the
+                    mouth at the same frame rate (see ov2640_window)
 """
-import json, math, os, re, sys, time, subprocess
+import json, math, os, re, sys, threading, time, subprocess
+import urllib.error, urllib.parse, urllib.request
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -258,51 +261,111 @@ class FileSource(VideoSource):
                 "realtime": self.realtime, "loop": self.loop, "t_play": round(self._t0, 3)}  # time of frame 0 of this play
 
 
+def ov2640_window(zoom, w, h):
+    """The ESP32-CAM board's /resolution parameters that make its OV2640 read only the centre 1/zoom of the view a w x h
+    frame size shows (esp32-camera sensors/ov2640.c: set_res_raw -> set_window; sx is the sensor mode).
+    SVGA mode (sx=1) reads the 1600x1200 array binned to 800x600 and the window is cut from that. Only for the frame
+    sizes the sensor already reads in SVGA mode at less than its detail, HVGA 480x320 and VGA 640x480, so the frame
+    rate stays. The window is sent pixel for pixel (never scaled): every allowed zoom gives the full 800/w detail
+    (1.67x the pixels across the mouth for HVGA, 1.25x for VGA) and the zoom only sets how much of the view is kept
+    (2x of HVGA: 400x264 frames, half the view). Because the frame size then always changes, it proves the board
+    applied the window. Sizes are multiples of 16x8, the JPEG block (every stock frame size is). More detail would need
+    UXGA mode (sx=0), whose full-array readout the OV2640 datasheet rates at 15 fps instead of 30."""
+    if not 400 < w < 800:
+        raise ValueError(f"window= needs framesize HVGA (480x320) or VGA (640x480), the sensor's SVGA mode; the board sends {w}x{h}")
+    fw, fh = (800, 800 * h / w) if w * 3 >= h * 4 else (600 * w / h, 600)  # the frame size's view: widest centred w:h region
+    rw, rh = int(fw / zoom) // 16 * 16, int(fh / zoom) // 8 * 8
+    if rw > w or rh > h or (rw, rh) == (w, h):
+        raise ValueError(f"window={zoom:g}x of {w}x{h} would be scaled, not more detail: use more than {800 / w:.2f}x")
+    return {"sx": 1, "offx": (800 - rw) // 2, "offy": (600 - rh) // 2, "tx": rw, "ty": rh, "ox": rw, "oy": rh}
+
+
 class StreamSource(VideoSource):
     """MJPEG-over-HTTP camera (ESP32-CAM `/stream`). Parses the multipart stream itself (no ffmpeg buffering) in a reader
     thread that keeps only the newest frame, so a slow consumer never accumulates lag. Reconnects when the stream stalls.
-    Frames are stamped at arrival time. The head camera looks at the patient, so the preview is not mirrored."""
+    Frames are stamped at arrival time. The head camera looks at the patient, so the preview is not mirrored.
+    ESP32-CAM (a bare host, or http://host:81/stream; any .../stream URL): the query holds /control settings, pushed on every open (a board
+    reboot resets them), and window=2x zooms the sensor into the centre of its view (see ov2640_window). The window is
+    pushed after the settings (a framesize push resets it) and while no stream is open (the sketch's stream handler can
+    end on a sensor reconfigure); open returns only once frames arrive at the window's size, so a board that ignores it
+    fails loudly. Any other URL is used as given, query included."""
     kind = "stream"
     mirror = False
     stall_s = 8.0   # WiFi hiccups of 0.5-3 s are normal on a hotspot; reopening the TCP stream during one turns them into 10 s outages
+    BUFFERED = 2    # frames the board may hold from before a settings change (CameraWebServer with PSRAM: fb_count=2)
 
     DEFAULT_SETTINGS = {"framesize": 9, "quality": 16}
 
     def __init__(self, url, timeout=5.0):
-        url, _, query = url.partition("?")
-        if not url.startswith("http"):
-            url = f"http://{url}" if ("/" in url or ":" in url) else f"http://{url}:81/stream"   # bare host -> the ESP32 default
-        self.settings = dict(self.DEFAULT_SETTINGS) if not url.startswith("http") or ":81/stream" in url else {}
-        for kv in query.split("&"):
-            if "=" in kv:
-                k, v = kv.split("=", 1); self.settings[k] = v
-        self.url, self.timeout = url, timeout
+        base, _, query = url.partition("?")
+        if not base.startswith("http"):
+            base = f"http://{base}" if ("/" in base or ":" in base) else f"http://{base}:81/stream"   # bare host -> the ESP32 default
+        self.settings, self.zoom = {}, None
+        if urllib.parse.urlsplit(base).path == "/stream":  # the CameraWebServer sketch's stream (defaults on its usual port 81)
+            self.settings = dict(self.DEFAULT_SETTINGS) if ":81/stream" in base else {}
+            self.settings.update(kv.split("=", 1) for kv in query.split("&") if "=" in kv)
+            query = ""
+            window = self.settings.pop("window", None)
+            if window is not None:
+                try:
+                    self.zoom = float(window.lower().rstrip("x"))
+                except ValueError:
+                    self.zoom = 0.0
+                if not 1 < self.zoom <= 8:
+                    raise ValueError(f"window must be a zoom above 1x and up to 8x (e.g. window=2x), got {window!r}")
+        elif "window=" in query:
+            raise ValueError(f"window= needs the ESP32-CAM stream (its host, or http://host:81/stream), not {base}")
+        self.url, self.timeout = base + (f"?{query}" if query else ""), timeout
+        u = urllib.parse.urlsplit(self.url)
+        self.board = f"{u.scheme}://{u.hostname}"   # the ESP32 sketch's control server (:80) next to the :81 stream
         self._frame, self._ts, self._seq, self._got = None, 0.0, 0, 0
         self._stop, self._thread, self._err, self._resp = False, None, None, None
         self.width = self.height = 0
         self.fps_est = 0.0
-        self._configured = False
+        self.full = None     # frame size of the whole view, measured on the first open: the window's geometry
+        self.window = None   # its /resolution parameters
 
-    def _configure(self):
-        """ESP32-CAM: push frame size / JPEG quality through /control on the board's :80 server (they reset on reboot)."""
-        import urllib.request, urllib.parse
-        if not self.settings or self._configured:   # the board keeps settings until it reboots; don't spend 2 requests per reopen
-            return
-        self._configured = True
-        u = urllib.parse.urlsplit(self.url)
-        base = f"{u.scheme}://{u.hostname}"
-        for k, v in self.settings.items():
-            try:
-                urllib.request.urlopen(f"{base}/control?var={k}&val={v}", timeout=2).read()
-            except Exception as e:
-                self._configured = False
-                print(f"[source] could not set {k}={v} on {base}: {e}")
-        time.sleep(0.3)
+    def _get(self, path, params):
+        q = urllib.parse.urlencode(params)
+        try:
+            urllib.request.urlopen(f"{self.board}{path}?{q}", timeout=2).read()
+        except urllib.error.HTTPError as e:
+            hint = " (this firmware has no sensor window: flash the current CameraWebServer example)" if path == "/resolution" and e.code == 404 else ""
+            raise RuntimeError(f"{self.board}{path}?{q} -> HTTP {e.code}{hint}")
+        except Exception as e:
+            raise RuntimeError(f"{self.board}{path}?{q} failed: {e}")
 
     def open(self):
-        import urllib.request
+        for k, v in self.settings.items():
+            self._get("/control", {"var": k, "val": v})
+        if self.zoom and self.window is None:  # first open: the whole view's frame size sets the window's geometry
+            self._connect()
+            try:
+                full = self._size_after(self.BUFFERED + 1)
+            finally:
+                self.release()
+            try:
+                self.window = ov2640_window(self.zoom, *full)
+            except ValueError as e:
+                raise RuntimeError(str(e))
+            self.full = full
+        if self.window:
+            self._get("/resolution", self.window)
+        self._connect()
+        try:
+            if self.window:
+                self._await_size(self.window["ox"], self.window["oy"])
+            elif self.settings:  # read() starts after the frames the board buffered before the change
+                self._size_after(self.BUFFERED + 1)
+                self._got = self._seq - 1
+        except Exception:
+            self.release()
+            raise
+        print(f"[source] stream {self.url} {self.width}x{self.height}" + (f", window {self.zoom:g}x of {self.full[0]}x{self.full[1]}: {self.window}" if self.window else ""))
+
+    def _connect(self):
         self._stop = False
-        self._configure()
+        self._frame, self._err, self._seq, self._got = None, None, 0, 0
         req = urllib.request.Request(self.url, headers={"User-Agent": "silent-running"})
         try:
             resp = urllib.request.urlopen(req, timeout=self.timeout)
@@ -310,18 +373,35 @@ class StreamSource(VideoSource):
             raise RuntimeError(f"cannot open MJPEG stream {self.url}: {e}")
         ctype = resp.headers.get("Content-Type", "")
         if "multipart" not in ctype:
+            resp.close()
             raise RuntimeError(f"{self.url} is not an MJPEG stream (Content-Type {ctype!r})")
         self._resp = resp
-        import threading
         self._thread = threading.Thread(target=self._reader, args=(resp,), daemon=True)
         self._thread.start()
+        try:
+            self._size_after(1)
+        except RuntimeError:
+            self.release()
+            raise
+
+    def _size_after(self, n):
+        """(width, height) of the n-th frame of this connection."""
         t0 = time.time()
-        while self._frame is None and time.time() - t0 < self.timeout:
-            if self._err: raise RuntimeError(self._err)
+        while self._seq < n:
+            if self._err or time.time() - t0 > self.timeout:
+                raise RuntimeError(self._err or f"{self.url}: {self._seq} of {n} frames within {self.timeout}s")
             time.sleep(0.02)
-        if self._frame is None:
-            raise RuntimeError(f"no frame from {self.url} within {self.timeout}s")
-        print(f"[source] stream {self.url} {self.width}x{self.height}")
+        h, w = self._frame.shape[:2]
+        return w, h
+
+    def _await_size(self, w, h):
+        """Wait for the board to send w x h frames; read() then starts at the newest of them."""
+        t0 = time.time()
+        while self._frame.shape[1::-1] != (w, h):
+            if self._err or time.time() - t0 > self.timeout:
+                raise RuntimeError(self._err or f"the board did not apply the sensor window: frames are still {self.width}x{self.height}, expected {w}x{h}")
+            time.sleep(0.02)
+        self._got = self._seq - 1
 
     def _reader(self, resp):
         import cv2, numpy as np
@@ -383,13 +463,9 @@ class StreamSource(VideoSource):
         if self._thread is not None:
             self._thread.join(timeout=1.0)
 
-    def reopen(self):
-        self.release()
-        self._frame, self._err, self._seq, self._got = None, None, 0, 0
-        self.open()
-
     def info(self):
-        return {**super().info(), "url": self.url, "fps": round(self.fps_est, 1), "width": self.width, "height": self.height, "settings": self.settings}
+        return {**super().info(), "url": self.url, "fps": round(self.fps_est, 1), "width": self.width, "height": self.height, "settings": self.settings,
+                **({"zoom": self.zoom, "full": self.full, "window": self.window} if self.zoom else {})}
 
 
 def _flag(v):
@@ -401,8 +477,7 @@ def make_source(spec, width=640, height=480, face_fn=None):
     spec = str(spec if spec is not None else "webcam").strip()
     if spec.lstrip("-").isdigit():
         spec = f"webcam:{spec}"
-    import re as _re
-    if spec.startswith(("http://", "https://")) or _re.match(r"^\d{1,3}(\.\d{1,3}){3}(:\d+)?(/.*)?$", spec):
+    if spec.startswith(("http://", "https://")) or re.match(r"^\d{1,3}(\.\d{1,3}){3}(:\d+)?(/[^?]*)?(\?.*)?$", spec):
         spec = "stream:" + spec   # a bare URL or IP means the network camera
     kind, _, arg = spec.partition(":")
     kind = kind.lower()

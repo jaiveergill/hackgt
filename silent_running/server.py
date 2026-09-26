@@ -31,7 +31,7 @@ app.mount("/static", StaticFiles(directory=STATIC), name="static")
 
 LLM_MARGIN = 3.0  # nats; an LLM proposal is accepted only if the visual model scores it within this of the raw top hypothesis
 PHRASE_GAP_THRESHOLD = 6.0  # nats; free transcript beating every phrase by more than this => "no phrase matched"
-STATE = {"mode": "phrase", "auto_listen": False, "auto_speak": True, "tts": "browser", "voice": None, "expressive": True, "emotion_override": None, "llm_enabled": True, "status": "idle", "utt_id": 0, "warm": False, "profile": None, "enroll": None}
+STATE = {"mode": "phrase", "auto_listen": False, "voice": None, "expressive": True, "emotion_override": None, "llm_enabled": True, "status": "idle", "utt_id": 0, "warm": False, "profile": None, "enroll": None, "pace": False}
 clients = set()
 loop = None
 engine = camera = context = phrase_decoder = llm = confirm_loop = capture = None
@@ -43,7 +43,6 @@ CRITICAL_CONF = 0.5
 LOG = []  # conversation log: [{ts, who, text, ...}]
 ENROLL = {"session": None}  # active enroll.Enrollment while the patient is enrolling; captured utterances go there instead of decoding
 work_lock = threading.Lock()
-SYSTEM_VOICE = "Daniel"  # macOS voice for the server's own prompts ("Sounds like: X?"); never the patient's voice (Samantha / ElevenLabs)
 SIGNAL_KINDS = ("nod", "shake", "blink_code", "fingers", "thumb", "point", "pain", "mouthing")  # shared event contract
 SIGNAL_CLOCK_SKEW = 60.0  # s; signal.ts must be time.time() (compared with the question's ask time), not a monotonic/media clock
 signals = queue.Queue()  # camera signals, handled in arrival order off the camera reader thread
@@ -75,12 +74,8 @@ def set_status(s, **kw):
     broadcast({"type": "status", "status": s, **kw})
 
 
-def speak_backend(text, voice="Samantha"):
-    return subprocess.Popen(["say", "-v", voice, text])
-
-
 # ----------------------------------------------------------------------------- decoding pipeline
-def run_decode(rois, n_face, n_total, duration, source="webcam", label=None, t_crop=0.0, expression=None, nonverbal=None):
+def run_decode(rois, duration, source="webcam", label=None, t_crop=0.0, expression=None, nonverbal=None, mouth_px=None):
     """Full pipeline on an utterance's mouth crops. Emits incremental events so the UI can show progress."""
     t_queued = time.time()
     t0 = t_queued - t_crop  # end of the utterance: every latency below includes the wait for work_lock
@@ -112,6 +107,7 @@ def run_decode(rois, n_face, n_total, duration, source="webcam", label=None, t_c
         broadcast({"type": "raw", "utt_id": uid, "stage": "greedy", "text": greedy, "n_frames": int(x.shape[1]), "duration": duration,
                    "latency": {"lock": wait, "crop": t1 - t0 - wait, "encode": t2 - t1, "greedy": t3 - t2}})
         result = {"utt_id": uid, "mode": STATE["mode"], "profile": STATE["profile"], "raw_greedy": greedy, "n_frames": int(x.shape[1]), "duration": duration, "source": source, "label": label,
+                  "mouth_px": mouth_px,  # median mouth width (camera px) while mouthing; the crop reads 45 (camera_proc.MouthPixels)
                   "expression": expression or {"emotion": "neutral", "intensity": 0.0}}
         result["nonverbal"] = nonverbal or nonverbal_dict(result["expression"])  # no camera (decode_file): every entry absent
         LAST["enc"] = enc; LAST["utt_id"] = uid
@@ -155,8 +151,6 @@ def run_decode(rois, n_face, n_total, duration, source="webcam", label=None, t_c
             elif decision["action"] == "speak":
                 confirm_loop.cancel("superseded by a new utterance", ts=t0)
                 _patient_said(sel, uid, result["critical"], pd["confidence"], emotion=(expression or {}).get("emotion"))
-                if STATE["auto_speak"] and STATE["tts"] == "backend":
-                    speak_backend(sel)
         else:
             set_status("processing", utt_id=uid, stage="beam")
             nbest = engine.beam_search(enc, 5)
@@ -171,8 +165,6 @@ def run_decode(rois, n_face, n_total, duration, source="webcam", label=None, t_c
             confirm_loop.cancel("superseded by a new utterance", ts=t0)
             context.add_history(nbest[0]["text"])
             _log("patient", _pretty(nbest[0]["text"]), confidence=probs[0], mode="open", emotion=(expression or {}).get("emotion"))
-            if STATE["auto_speak"] and STATE["tts"] == "backend":
-                speak_backend(nbest[0]["text"])
             if STATE["llm_enabled"] and llm is not None:
                 threading.Thread(target=_bg_llm, args=(nbest, uid, enc), daemon=True).start()
         return result
@@ -219,16 +211,6 @@ def _bg_llm(nbest, uid, enc):
                "corrected": _pretty(prop if accepted else top), "latency": time.time() - t0, "model": llm.model})
 
 
-def _word_edits(a, b):
-    a, b = a.lower().split(), b.lower().split()
-    d = list(range(len(b) + 1))
-    for i, wa in enumerate(a, 1):
-        prev, d[0] = d[0], i
-        for j, wb in enumerate(b, 1):
-            prev, d[j] = d[j], min(d[j] + 1, d[j - 1] + 1, prev + (wa != wb))
-    return d[len(b)]
-
-
 LAST = {"enc": None, "utt_id": 0}
 
 
@@ -240,18 +222,6 @@ def _confirm_emit(ev):
     if say:  # the confirmed phrase is the patient's words; the prompts are the system talking
         ev["say_voice"] = "patient" if ev["state"] == "confirmed" else "system"
     broadcast(ev)
-    if say and STATE["auto_speak"] and STATE["tts"] == "backend":
-        p = speak_backend(say) if ev["state"] == "confirmed" else speak_backend(say, voice=SYSTEM_VOICE)
-        if ev["state"] == "asking":
-            threading.Thread(target=_after_backend_prompt, args=(p, ev), daemon=True).start()
-
-
-def _after_backend_prompt(p, ev):
-    """The server's own voice finished "Sounds like: X?": start the patient's answer window."""
-    if p.wait() == 0:
-        confirm_loop.played(ev["utt_id"], ev["attempt"])
-    else:
-        broadcast({"type": "error", "utt_id": ev["utt_id"], "message": f"backend voice failed (say exit {p.returncode}); confirmation times out unheard"})
 
 
 def _patient_said(text, uid, critical, confidence, **log):
@@ -363,7 +333,6 @@ def _safe_timing(enc, text):
 def _link_monitor():
     """Every 5 s: the capture process's frame stats (fps, gaps) and, for a network camera, one ping to the board.
     Lag that the user sees is diagnosable afterwards from these two lines alone."""
-    import re as _re
     while True:
         time.sleep(5.0)
         try:
@@ -376,18 +345,33 @@ def _link_monitor():
             info = cam.source_info or {}
             host = None
             if info.get("kind") == "stream":
-                m = _re.match(r"https?://([^/:]+)", info.get("url", ""))
+                m = re.match(r"https?://([^/:]+)", info.get("url", ""))
                 host = m.group(1) if m else None
             if host:
                 p = subprocess.run(["ping", "-c", "3", "-i", "0.2", "-W", "1000", host], capture_output=True, text=True, timeout=6)
-                rtts = [float(x) for x in _re.findall(r"time=([\d.]+)", p.stdout)]
-                loss = _re.search(r"([\d.]+)% packet loss", p.stdout)
+                rtts = [float(x) for x in re.findall(r"time=([\d.]+)", p.stdout)]
+                loss = re.search(r"([\d.]+)% packet loss", p.stdout)
                 sessionlog.log("ping", host=host, rtt_ms=[round(r, 1) for r in rtts], max_ms=round(max(rtts), 1) if rtts else None,
                                loss_pct=float(loss.group(1)) if loss else None)
             cpu = os.getloadavg()[0]
             sessionlog.log("host", load1=round(cpu, 2), busy=work_lock.locked(), status=STATE.get("status"), warm=STATE.get("warm"))
         except Exception as e:
             sessionlog.log("monitor_error", error=repr(e))
+
+
+def _load_aligner():
+    """The MMS forced aligner behind "match my pace" (prosody.align_audio_words): +1.5 GB resident and 2.6-25 s to load,
+    measured. It loads when pace matching is switched on, so a server that never uses it never pays for it; the UI shows
+    "warming up" meanwhile, since the load competes with decodes for CPU."""
+    if prosody._mms is not None:
+        return
+    STATE["warm"] = False; broadcast({"type": "state", "state": STATE})
+    try:
+        t = time.time(); prosody._aligner(); print(f"[prosody] MMS aligner ready in {time.time()-t:.1f}s")
+    except Exception as e:
+        STATE["pace"] = False
+        broadcast({"type": "error", "message": f"match my pace switched off: the voice aligner failed to load: {e}"})
+    STATE["warm"] = True; broadcast({"type": "state", "state": STATE})
 
 
 def _keep_warm():
@@ -511,6 +495,9 @@ def api_say(text: str, emotion: str = "neutral", intensity: float = 0.0, rate: f
     report = {"emotion": emotion, "intensity": intensity, "rate": rate, "tag": plan["tag"], "model": plan["model"], "stability": plan["settings"]["stability"],
               "cached": cached, "t_synth": round(time.time() - t0, 2), "retime": {"applied": False}}
     timing = LAST.get("timing") if utt_id and utt_id == LAST.get("utt_id") else None
+    if retime and timing and prosody._mms is None:  # never a 2.6-25 s aligner load inside a spoken reply (_load_aligner)
+        report["retime"] = {"applied": False, "reason": "voice aligner not loaded yet: match my pace was just switched on, or failed to load"}
+        retime = 0
     if not (retime and timing and timing.get("words")):  # nothing to retime: the clip as synthesized, no mp3 -> wav decode
         report["total"] = round(time.time() - t0, 2)
         broadcast({"type": "delivery", "utt_id": utt_id, **report})
@@ -556,7 +543,7 @@ async def api_voice_clone_upload(speaker: str, request: Request):
 
 @app.get("/api/voices")
 def api_voices():
-    return {"available": eltts.available(), "can_clone": eltts.can_clone(), "voices": eltts.list_voices(),
+    return {"available": eltts.available(), "voices": eltts.list_voices(),
             "stock": eltts.stock_voices()[:12], "selected": STATE.get("voice")}
 
 
@@ -571,15 +558,12 @@ def api_voice_clone(speaker: str):
         return JSONResponse({"error": "no voiced takes"}, status_code=400)
     try:
         rec = eltts.create_voice(speaker, wavs)
-        STATE["voice"] = speaker
-        broadcast({"type": "state", "state": STATE})
-        threading.Thread(target=lambda: print("[tts] prewarmed", eltts.prewarm_phrase_bank(rec["voice_id"], phrases)), daemon=True).start()
-        n = 0
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=502)
     STATE["voice"] = speaker
     broadcast({"type": "state", "state": STATE})
-    return {**rec, "prewarmed": n}
+    threading.Thread(target=lambda: print("[tts] prewarmed", eltts.prewarm_phrase_bank(rec["voice_id"], phrases)), daemon=True).start()
+    return {**rec, "prewarming": True}
 
 
 @app.get("/api/state")
@@ -625,7 +609,7 @@ def api_source(spec: str):
 
 
 def _file_rois(path):
-    """Video file -> (abs path, mouth crops, n_face, n_frames, crop seconds, fps), or a JSONResponse error."""
+    """Video file -> (abs path, mouth crops, n_frames, crop seconds, fps), or a JSONResponse error."""
     p = path if os.path.isabs(path) else os.path.join(ROOT, path)
     if not os.path.exists(p):
         return JSONResponse({"error": "not found"}, status_code=404)
@@ -641,7 +625,7 @@ def _file_rois(path):
         return JSONResponse({"error": f"crop failed: {e}"}, status_code=400)
     with av.open(p) as c:
         fps = float(c.streams.video[0].average_rate)
-    return p, rois, n_face, len(frames), time.time() - t0, fps
+    return p, rois, len(frames), time.time() - t0, fps
 
 
 @app.post("/api/decode_file")
@@ -650,8 +634,8 @@ def api_decode_file(path: str, label: str = None):
     r = _file_rois(path)
     if isinstance(r, JSONResponse):
         return r
-    p, rois, n_face, n, t_crop, _ = r
-    res = run_decode(rois, n_face, n, n / 25.0, source=os.path.relpath(p, ROOT), label=label, t_crop=t_crop)
+    p, rois, n, t_crop, _ = r
+    res = run_decode(rois, n / 25.0, source=os.path.relpath(p, ROOT), label=label, t_crop=t_crop)
     if res is None and ENROLL["session"] is not None:
         return JSONResponse({"error": "enrolling: recognition is off until /api/enroll/stop (use /api/enroll/file to add a take)"}, status_code=409)
     return res or {"error": "decode failed"}
@@ -798,8 +782,8 @@ def api_enroll_file(path: str, phrase: str = None):
     r = _file_rois(path)
     if isinstance(r, JSONResponse):
         return r
-    if abs(r[5] - 25.0) > 0.01:  # a take is a template for live 25 fps captures; other rates would skew its DTW similarity
-        return JSONResponse({"error": f"clip is {r[5]:.2f} fps; enrollment takes must be 25 fps (ffmpeg -r 25)"}, status_code=400)
+    if abs(r[4] - 25.0) > 0.01:  # a take is a template for live 25 fps captures; other rates would skew its DTW similarity
+        return JSONResponse({"error": f"clip is {r[4]:.2f} fps; enrollment takes must be 25 fps (ffmpeg -r 25)"}, status_code=400)
     with work_lock:
         sess = ENROLL["session"]
         if sess is None:
@@ -848,16 +832,18 @@ async def ws_endpoint(ws: WebSocket):
                 STATE["mode"] = msg.get("mode", "phrase")
                 broadcast({"type": "state", "state": STATE})
             elif cmd == "settings":
-                for k in ("auto_speak", "tts", "llm_enabled", "voice", "expressive", "emotion_override"):
+                for k in ("llm_enabled", "voice", "expressive", "emotion_override"):
                     if k in msg: STATE[k] = msg[k]
+                if "pace" in msg:  # "match my pace": the voice aligner it needs loads now, not at every startup
+                    STATE["pace"] = bool(msg["pace"])
+                    if STATE["pace"]:
+                        threading.Thread(target=_load_aligner, daemon=True).start()
                 if "auto_listen" in msg and camera:
                     STATE["auto_listen"] = bool(msg["auto_listen"]); camera.set_auto(STATE["auto_listen"])
                 broadcast({"type": "state", "state": STATE})
             elif cmd == "context":
                 context.update(notes=msg.get("notes"), category=msg.get("category"), last_prompt=msg.get("last_prompt"))
                 broadcast({"type": "context", "context": context.snapshot()})
-            elif cmd == "speak":
-                speak_backend(msg.get("text", ""))
             elif cmd == "nurse":
                 threading.Thread(target=nurse_listen, args=(float(msg.get("seconds", 5)),), daemon=True).start()
             elif cmd == "nurse_text":
@@ -928,7 +914,7 @@ def _decode_utterance(u, source="webcam"):
         return
     if _enroll_utterance(u["rois"]):
         return
-    run_decode(u["rois"], u["n_face"], u["n_total"], u["duration"], source=source, t_crop=u["t_crop"], expression=u.get("expression"), nonverbal=u.get("nonverbal"))
+    run_decode(u["rois"], u["duration"], source=source, t_crop=u["t_crop"], expression=u.get("expression"), nonverbal=u.get("nonverbal"), mouth_px=u.get("mouth_px"))
 
 
 def _save_sample(phrase, speaker):
@@ -1029,14 +1015,7 @@ def main():
         sessionlog.log("camera_opened", opened=camera.opened, fatal=camera.fatal, source=camera.source_info or str(camera.source))
     threading.Thread(target=_keep_warm, daemon=True).start()
     threading.Thread(target=_link_monitor, daemon=True).start()
-    def _prewarm_aligner():
-        try:
-            t = time.time(); prosody._aligner(); print(f"[prosody] MMS aligner ready in {time.time()-t:.1f}s")
-        except Exception as e:
-            print("[prosody] aligner prewarm failed:", e)
-        STATE["warm"] = True  # engine warmup (above) and aligner prewarm are done: latency measured from now on is steady state
-        broadcast({"type": "state", "state": STATE})  # the UI shows "warming up" until this arrives
-    threading.Thread(target=_prewarm_aligner, daemon=True).start()
+    STATE["warm"] = True  # engine warmed up and the camera started (or failed, reported): latency from now on is steady state
     def _prewarm_tts():  # the ElevenLabs SDK import and client, and the stock voice list the UI asks for first
         t = time.time()
         if eltts.available():

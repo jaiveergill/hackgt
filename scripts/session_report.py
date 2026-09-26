@@ -47,6 +47,9 @@ def main():
         print(f"  interval   p95 median {st.median(p95):.0f} ms   worst frame gap {max(mx)/1000:.2f} s")
         print(f"  gaps>0.3s  {n_gaps} total = {n_gaps/(len(cs)*5/60):.1f} per minute;  longest: {sorted(gaps, reverse=True)[:8]}")
         print(f"  face seen  {st.median(face)*100:.0f}% of frames (median window)")
+        mouth = [c["mouth_px"] for c in cs if c.get("mouth_px")]
+        if mouth:  # the model's crop reads a mouth 45 px wide; below that it is upsampled (camera_proc.MouthPixels)
+            print(f"  mouth      median {st.median(mouth):.0f} px wide   min {min(mouth)}   (windows under 45 px: {sum(m < 45 for m in mouth)}/{len(mouth)})")
         bad = [c for c in cs if c["max_ms"] > 1000]
         if bad:
             print("  windows with a gap over 1 s at (min:sec):", ", ".join(f"{int(c['rel']//60)}:{int(c['rel']%60):02d}({c['max_ms']/1000:.1f}s)" for c in bad[:12]))
@@ -75,8 +78,7 @@ def main():
         tot = [r["latency"]["total"] for r in res if r.get("latency")]
         enc = [r["latency"].get("encode") for r in res if r.get("latency") and r["latency"].get("encode") is not None]
         ph = [r["latency"].get("phrase") for r in res if r.get("latency") and r["latency"].get("phrase") is not None]
-        early = [r for r in res if r.get("early")]
-        print(f"\nDECODES ({len(res)}; {len(early)} committed early while mouthing)")
+        print(f"\nDECODES ({len(res)})")
         print(f"  total      p50 {fmt_ms(pct(tot, .5))}   p95 {fmt_ms(pct(tot, .95))}   max {fmt_ms(max(tot) if tot else None)}")
         if enc: print(f"  encode     p50 {fmt_ms(pct(enc, .5))}   max {fmt_ms(max(enc))}")
         if ph:  print(f"  phrase     p50 {fmt_ms(pct(ph, .5))}   max {fmt_ms(max(ph))}")
@@ -86,10 +88,6 @@ def main():
         if slow:
             print("  slow (>1 s):", ", ".join(f"{int(r['rel']//60)}:{int(r['rel']%60):02d} {r['latency']['total']:.1f}s {r.get('selected')!r}" for r in slow[:8]))
         print("  last 8:", " | ".join(f"{r.get('selected')} {round((r.get('confidence') or 0)*100)}% {round(r['latency']['total']*1000)}ms" for r in res[-8:]))
-    pa = by.get("partial", [])
-    if pa:
-        sm = [p["score_ms"] for p in pa if p.get("score_ms") is not None]
-        print(f"\nSTREAMING PARTIALS ({len(pa)})  score p50 {pct(sm, .5)} ms  p95 {pct(sm, .95)} ms  max {max(sm)} ms")
 
     # ---- voice
     dv = by.get("delivery", [])
@@ -117,7 +115,7 @@ def main():
     if "--events" in sys.argv:
         print("\nTIMELINE")
         for r in rows:
-            if r["ev"] in ("camera_error", "error", "result", "alert", "refined", "camera_opened"):
+            if r["ev"] in ("camera_error", "error", "result", "alert", "camera_opened"):
                 d = {k: v for k, v in r.items() if k not in ("t", "rel", "ev")}
                 print(f"  {int(r['rel']//60)}:{int(r['rel']%60):02d}  {r['ev']:13s} {json.dumps(d)[:160]}")
 

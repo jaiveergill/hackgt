@@ -18,6 +18,22 @@ MODEL_FPS = 25.0
 AUTO_HANG = float(os.environ.get("SR_AUTO_HANG", "0.35"))
 
 
+class MouthPixels:
+    """How wide the mouth is in camera pixels, measured the way the crop sees it. The crop fits the face to Chaplin's
+    reference face (a similarity transform on eyes, nose tip and mouth centre, VideoProcess.affine_transform) and cuts
+    the model's 96x96 input there, where the mouth is 45 px wide (`need`). A smaller mouth is upsampled into the crop,
+    i.e. blurred; measured on MIRACL clips, half the pixels cut Phrase Mode top-1 from 64% to 38%."""
+    def __init__(self, vp):
+        self.vp = vp
+        self.ref = vp.get_stable_reference(vp.reference, (256, 256), (256, 256))
+        self.need = float(np.linalg.norm(vp.reference[48] - vp.reference[54]))  # mouth corners of the reference face
+
+    def __call__(self, lm):
+        """Mouth width in pixels of the frame `lm` (the 4 keypoints) came from, or None if the fit is degenerate."""
+        a = self.vp.estimate_affine_transform(lm.astype(np.float32), (0, 1, 2, 3), self.ref)
+        return None if a is None else self.need / float(np.hypot(a[0, 0], a[1, 0]))  # the fit scales frame -> reference
+
+
 def resample_25fps(items):
     ts = np.array([t for t, _, _ in items])
     t0, t1 = ts[0], ts[-1]
@@ -129,33 +145,6 @@ class IncrementalCropper:
             self.rgb[i] = None
 
 
-class _MPDetector:
-    """MediaPipe face detection -> [right eye, left eye, nose tip, mouth centre] pixel coords (or None). Mirrors
-    third_party/chaplin/pipelines/detectors/mediapipe/detector.py so crops match what the VSR model was trained on."""
-    def __init__(self):
-        import mediapipe as mp
-        self.fd = mp.solutions.face_detection
-        self.short_range_detector = self.fd.FaceDetection(min_detection_confidence=0.5, model_selection=0)
-        self.full_range_detector = self.fd.FaceDetection(min_detection_confidence=0.5, model_selection=1)
-
-    def detect(self, frames, detector):
-        out = []
-        for frame in frames:
-            res = detector.process(frame)
-            if not res.detections:
-                out.append(None); continue
-            ih, iw = frame.shape[:2]
-            best, best_size = None, -1
-            for d in res.detections:
-                b = d.location_data.relative_bounding_box
-                size = b.width * iw + b.height * ih
-                if size > best_size:
-                    best, best_size = d, size
-            kp = best.location_data.relative_keypoints
-            out.append(np.array([[int(kp[i].x * iw), int(kp[i].y * ih)] for i in range(4)]))
-        return out
-
-
 class _Outbox:
     """Sends to the parent from a thread so the capture loop never blocks on the pipe. The parent's reader thread can be
     starved of the GIL for over a second (model loading, decoding); a blocking send then froze capture itself, dropping the
@@ -206,6 +195,7 @@ def _worker(conn, spec, width, height, preview_width, buffer_seconds):
     expr = ExpressionTracker()
     signals = Signals()
     vp = VideoProcess(convert_gray=True)
+    mouth_px = MouthPixels(vp)
 
     t_origin = time.time()  # one clock for every landmarker call (VIDEO mode needs increasing timestamps), probe included
     try:
@@ -219,11 +209,13 @@ def _worker(conn, spec, width, height, preview_width, buffer_seconds):
     out = _Outbox(conn)
     signals.attach(out.send)  # after "opened": its sends go through the outbox like every other worker message
     stats_t0, stats_prev, stats_iv, stats_gaps, stats_face, lm_prev_face = time.time(), None, [], [], 0, False
+    stats_mouth = []  # mouth widths (px) of this stats window's tracked frames
     STALL_S, MAX_RETRY_S = 1.5, 8.0  # report + reopen a live camera after 1.5 s without frames; back off to 8 s while it stays gone
     last_frame = last_reopen = time.time()
     retry_s = STALL_S
 
     buffer = collections.deque(maxlen=int(35 * buffer_seconds))
+    mouth_hist = collections.deque(maxlen=buffer.maxlen)  # (ts, mouth width px) of tracked frames: the utterance's median
     listen_start = None
     fps_t, fps_n, fps = time.time(), 0, 0.0
     frame_i = 0
@@ -253,7 +245,9 @@ def _worker(conn, spec, width, height, preview_width, buffer_seconds):
         rois, n_face, n_total, dur, err = c.finish(end)
         if err:
             out.send(("utterance", None, n_face, n_total, dur, err, 0.0, tag)); return
-        out.send(("utterance", rois, n_face, n_total, dur, None, time.time() - t0, tag, expression, signals.summary(start, end, expression)))
+        mpx = [m for t, m in mouth_hist if start <= t <= end]
+        out.send(("utterance", rois, n_face, n_total, dur, None, time.time() - t0, tag, expression, signals.summary(start, end, expression),
+                  round(float(np.median(mpx))) if mpx else None))
 
     while True:
       try:
@@ -280,7 +274,7 @@ def _worker(conn, spec, width, height, preview_width, buffer_seconds):
                 if len(items) < 8:
                     out.send(("snapshot", None))
                 else:
-                    frames, lms, dur = resample_25fps(items)
+                    frames = resample_25fps(items)[0]
                     out.send(("snapshot", frames))
             elif cmd[0] == "quit":
                 src.release()
@@ -315,8 +309,9 @@ def _worker(conn, spec, width, height, preview_width, buffer_seconds):
             iv = sorted(stats_iv)
             out.send(("stats", {"fps": round(len(stats_iv) / (ts - stats_t0), 1), "p50_ms": round(iv[len(iv) // 2] * 1000), "p95_ms": round(iv[int(len(iv) * 0.95)] * 1000),
                                 "max_ms": round(iv[-1] * 1000), "gaps": stats_gaps[-10:], "n_gaps": len(stats_gaps), "face_rate": round(stats_face / max(len(stats_iv), 1), 2),
+                                "mouth_px": round(float(np.median(stats_mouth))) if stats_mouth else None,
                                 "source": src.info(), "listening": listen_start is not None or auto_start is not None}))
-            stats_t0, stats_iv, stats_gaps, stats_face = ts, [], [], 0
+            stats_t0, stats_iv, stats_gaps, stats_face, stats_mouth = ts, [], [], 0, []
         if src.discontinuity:  # file looped: don't count the jump as mouth motion
             prev_patch = None
         rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
@@ -325,6 +320,9 @@ def _worker(conn, spec, width, height, preview_width, buffer_seconds):
         except Exception as e:
             print("[camera] detect failed:", e); lm, bs = None, None
         lm_prev_face = lm is not None
+        mpx = mouth_px(lm) if lm is not None else None
+        if mpx:
+            stats_mouth.append(mpx); mouth_hist.append((ts, mpx))
         buffer.append((ts, rgb, lm))
         if cropper is not None:
             cropper.feed(ts, rgb, lm)
@@ -403,7 +401,8 @@ def _worker(conn, spec, width, height, preview_width, buffer_seconds):
         if src.mirror:
             frame = cv2.flip(frame, 1)
         ok, jpg = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 70])
-        meta = {"face": face, "fps": round(fps, 1), "frame_w": w, "frame_h": h, "bbox": bbox, "face_frac": round(face_frac, 3), "listening": listening, "n_frames": n_listen,
+        meta = {"face": face, "fps": round(fps, 1), "frame_w": w, "frame_h": h, "bbox": bbox, "face_frac": round(face_frac, 3),
+                "mouth_px": round(mpx) if mpx else None, "mouth_px_need": round(mouth_px.need), "listening": listening, "n_frames": n_listen,
                 "auto": auto, "energy": round(energy, 2), "noise": round(noise or 0.0, 2), "mouth_active": bool(auto_start is not None),
                 "expression": expr.live_meta(), "source": src.info(), "preview_dropped": out.dropped, "hands": signals.status}
         if ok:
@@ -436,7 +435,6 @@ class CameraProcess:
         self.on_auto_utterance = None
         self.on_error = None
         self.stats = None
-        self.on_stats = None   # capture-process frame stats every 5 s (session log)
         self.on_signal = None  # must return immediately: it runs on the reader thread (the server only queues the signal)
         self._quit = False
         threading.Thread(target=self._reader, daemon=True).start()
@@ -552,8 +550,6 @@ class CameraProcess:
                 self.on_error(msg[1])
         elif msg[0] == "stats":
             self.stats = msg[1]
-            if self.on_stats:
-                self.on_stats(msg[1])
         elif msg[0] == "signal":
             if self.on_signal:
                 self.on_signal(msg[1])
@@ -570,7 +566,8 @@ class CameraProcess:
     @staticmethod
     def _utt(msg):
         return {"rois": msg[1], "n_face": msg[2], "n_total": msg[3], "duration": msg[4], "error": msg[5], "t_crop": msg[6] if len(msg) > 6 else 0.0,
-                "expression": msg[8] if len(msg) > 8 else None, "nonverbal": msg[9] if len(msg) > 9 else None}
+                "expression": msg[8] if len(msg) > 8 else None, "nonverbal": msg[9] if len(msg) > 9 else None,
+                "mouth_px": msg[10] if len(msg) > 10 else None}
 
     def set_auto(self, on):
         self._auto = bool(on)

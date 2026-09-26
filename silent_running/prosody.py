@@ -4,10 +4,9 @@
   align_audio_words(wav, sr, words)      -> [{"word", "start", "end"}] on the synthesized audio (MMS forced aligner)
   retime(wav, sr, audio_words, video_words) -> wav stretched per word with video pauses inserted
 """
-import io, re, subprocess, tempfile, os
+import io, re, subprocess, tempfile, os, threading
 import numpy as np
 import torch, torchaudio
-import torch.nn.functional as F
 
 FPS = 25.0
 WORD_S = 0.32          # rough natural spoken duration per word, for the global rate estimate
@@ -65,11 +64,13 @@ def video_word_timing(engine, enc, text):
 
 
 _mms = None
+_mms_lock = threading.Lock()
 def _aligner():
     global _mms
-    if _mms is None:
-        bundle = torchaudio.pipelines.MMS_FA
-        _mms = (bundle.get_model(), bundle.get_dict(), bundle.get_labels())
+    with _mms_lock:  # loaded once even when "match my pace" is switched on while a retime request is already loading it
+        if _mms is None:
+            bundle = torchaudio.pipelines.MMS_FA
+            _mms = (bundle.get_model(), bundle.get_dict(), bundle.get_labels())
     return _mms
 
 

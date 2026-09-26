@@ -64,7 +64,8 @@ python scripts/captures.py rescore    # re-read every labelled clip with this ch
   WER 0.273 raw, 0.227 after verified correction (`plans/PLAN_1_LLM_CONTEXT.md`).
 * **Expressive delivery** (`plans/PLAN_4_EXPRESSIVE_DELIVERY.md`): with an ElevenLabs voice selected, your face sets the emotion
   ("match my face": MediaPipe blendshapes -> angry / warm / sad / surprised + intensity -> v3 audio tag + stability), and with
-  "match my pace" (off by default: aligning the audio delays the voice, `plans/PLAN_5_LATENCY.md`) your mouth sets the timing
+  "match my pace" (off by default: aligning the audio delays the voice, `plans/PLAN_5_LATENCY.md`; its 1.5 GB voice aligner loads
+  only when you switch it on) your mouth sets the timing
   (CTC forced alignment on the lip-reading model -> per-word durations and pauses -> speed setting + per-word retiming of the
   returned audio). Neutral speech at the natural pace plays from a voice bank the page decodes when the voice is picked (every
   phrase the server has cached); other text streams from ElevenLabs as it is generated (`/api/tts_stream`).
@@ -77,9 +78,22 @@ python scripts/captures.py rescore    # re-read every labelled clip with this ch
   `scripts/eval_hang.py` measures splits and false triggers per value). Latency, measured end to end with
   `scripts/eval_latency.py`: `plans/PLAN_5_LATENCY.md`.
 
+* **Busy laptop?** `SR_HANDS=0` turns hand gestures off. They cost 13.5 ms on the frames they run on (every 2nd), 6.7 ms per
+  frame on average (face tracking: 7 ms), so they only matter for the frame rate when the CPU is saturated; the ESP32's
+  ~18 fps is set by the WiFi link, not the laptop.
+
 ## Tips that matter for accuracy
 
 * Face the camera squarely, ~40-60 cm away, mouth well lit from the front (no backlight).
+* Watch **mouth N/45 px** on the camera badge: the mouth's width in camera pixels vs the 45 px the model's crop reads.
+  Amber (under 45) means the crop is upsampled, i.e. blurred: move closer or zoom in. Half the pixels cut Phrase Mode
+  top-1 from 64% to 38% on MIRACL clips. Each result, the session log and the capture log record it too.
+* ESP32-CAM zoom: `--source stream:172.20.10.2?window=2x` makes the sensor read only the centre half of its view, sent
+  pixel for pixel: 1.67x the pixels across the mouth over the same WiFi link (same sensor mode and clock as HVGA, so the
+  frame rate should hold: not yet measured on the board). That is the most detail the sensor gives at this frame rate;
+  the zoom only sets how much of the view is kept, from just over 1.67x (widest, 464x312) to 2x (400x264). The server
+  refuses zooms it could only scale, checks the board applied the window, and errors if the firmware can't
+  (`scripts/check_stream_window.py` checks our side against a fake board).
 * Mouth at normal or slightly slower pace with clear articulation; hold Listen a beat before and after.
 * Utterances of 1-3 s work best; the model saw 25 fps TED talks, so keep the head reasonably still.
 
@@ -99,7 +113,7 @@ Each result line has the raw transcript, n-best, the phrase ranking, top-1/top-3
 * `silent_running/camera.py` – capture thread with per-frame face tracking and 25 fps utterance resampling
 * `silent_running/server.py` – FastAPI app (MJPEG preview, websocket events, `/api/decode_file`)
 * `silent_running/static/index.html` – bedside UI
-* `scripts/` – `prove_primitive.py`, `record_samples.py`, `eval.py`, `test_phrase_scoring.py`, `exp_lm_llm.py` (LM / LLM WER experiment),
+* `scripts/` – `prove_primitive.py`, `record_samples.py`, `eval.py`, `exp_lm_llm.py` (LM / LLM WER experiment),
   `record_session.py` + `prep_session.py` + `adapt.py` (speaker adaptation and voice-clone data, see `plans/`)
 * `silent_running/tts.py` – ElevenLabs TTS with cache and voice cloning
 * `plans/` – the three plan documents (LLM context, speaker adaptation, voice cloning) with measured status

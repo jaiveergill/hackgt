@@ -34,10 +34,10 @@ class CaptureLog:
         self.session = f"{datetime.datetime.now():%Y%m%d-%H%M%S}_{host}"
         self.path = os.path.join(DIR, self.session + ".jsonl")
         self.clip_dir = os.path.join(DIR, "clips", self.session)
-        os.makedirs(self.clip_dir, exist_ok=True)
         self.lock = threading.Lock()
         self.utts = set()  # captured utt_ids: events of other utterances (decode_file, tests) are not logged
-        self._write({"type": "session", "session": self.session, "host": host, "commit": _git_commit(), **meta})
+        # written with the first utterance: a run that captures nothing (smoke tests, decode_file) leaves no file to commit
+        self.header = {"type": "session", "session": self.session, "host": host, "commit": _git_commit(), **meta}
 
     def _write(self, rec):
         rec = {"ts": round(datetime.datetime.now().timestamp(), 3), **rec}
@@ -46,6 +46,9 @@ class CaptureLog:
 
     def utterance(self, utt_id, rois, source):
         """Records the crops the model is about to read. The clip is encoded on a thread: capture adds no decode latency."""
+        if not self.utts:
+            os.makedirs(self.clip_dir, exist_ok=True)
+            self._write(self.header)
         self.utts.add(utt_id)
         rel = os.path.relpath(os.path.join(self.clip_dir, f"{utt_id:05d}.mkv"), DIR)
         self._write({"type": "utterance", "utt_id": utt_id, "clip": rel, "frames": int(len(rois)), "source": source})
