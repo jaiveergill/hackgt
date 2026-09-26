@@ -7,7 +7,7 @@ protocol, and waits (real time) for each expected UI state in order: hero state 
 the critical alert, then a manual space-bar take. Then, with the scenes paused: a 40-message conversation at 1920x1080 and
 1280x720 (the page must not grow and the newest message must be in view), an injection fuzz over every string field the
 UI renders, the hand-signal chips and hand-tracker state, the confirm prompt protocol, and speak(): the face emotion for non-lip text, and a superseded
-playback not falling back to the browser voice.
+playback not falling back to the browser voice (the mouthed pace only with "match my pace").
 Prints expected vs actual per step and any page JS exceptions.
 Exit code 0 = every step reached and no exceptions.
 """
@@ -155,12 +155,13 @@ SPEAK_JS = """(()=>{const s=document.querySelector('#voice'),o=document.createEl
     ranking:['I am cold','I am hot'].map((phrase,i)=>({phrase,vsr_prob:.8-i*.6,final_prob:.8-i*.6,prior:0,reasons:[],vsr_score:-1,att:-1,ctc:-1})),
     expression:{emotion:'sad',intensity:.8},timing:{duration:1.6,rate:1.3,pauses:[],words:[]}});
   const q=()=>{const u=new URL(player.src).searchParams;return ['emotion','intensity','rate','utt_id'].map(k=>k+'='+u.get(k)).join('&')};
-  const r={};speak('I am cold',{utt_id:7});r.lip_phrase=q();speak('I am freezing',{utt_id:7});r.llm_text=q();
+  const r={};speak('I am cold',{utt_id:7});r.lip_phrase=q();document.querySelector('#pace').checked=true;speak('I am cold',{utt_id:7});r.lip_phrase_pace=q();
+  document.querySelector('#pace').checked=false;speak('I am freezing',{utt_id:7});r.llm_text=q();
   document.querySelectorAll('#dym button')[1].click();r.candidate_tap=q();
   const after=(ms,f)=>new Promise(res=>setTimeout(()=>res(f()),ms));
   return after(800,()=>{spoken.length=0;speak('FIRST');speak('SECOND')}).then(()=>after(1500,()=>{r.browser_fallback=[...spoken];spoken.length=0;speak('THIRD');speakSystem('PROMPT',{})}))
     .then(()=>after(1500,()=>{r.clip_then_prompt=[...spoken];return r}))})()"""
-SPEAK_EXP = {"lip_phrase": "emotion=sad&intensity=0.8&rate=1.3&utt_id=7", "llm_text": "emotion=sad&intensity=0.8&rate=1&utt_id=0",
+SPEAK_EXP = {"lip_phrase": "emotion=sad&intensity=0.8&rate=1&utt_id=7", "lip_phrase_pace": "emotion=sad&intensity=0.8&rate=1.3&utt_id=7", "llm_text": "emotion=sad&intensity=0.8&rate=1&utt_id=0",
              "candidate_tap": "emotion=sad&intensity=0.8&rate=1&utt_id=0", "browser_fallback": ["SECOND"], "clip_then_prompt": ["PROMPT"]}
 
 

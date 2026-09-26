@@ -400,18 +400,46 @@ def stream():
 
 
 @app.get("/api/tts")
-def api_tts(text: str, voice: str = None):
-    """Cloned-voice speech (Plan 3). Returns MP3; 503 if no ElevenLabs key or voice so the UI falls back to the browser voice."""
+def api_tts(text: str, voice: str = None, cached_only: int = 0):
+    """Cloned-voice speech (Plan 3). Returns MP3; 503 if no ElevenLabs key or voice so the UI falls back to the browser voice.
+    cached_only=1: 404 instead of synthesizing (the UI's voice bank loads what the server already has, at no ElevenLabs cost)."""
     from fastapi.responses import Response
     speaker = voice or STATE.get("voice")
     vid = eltts.voice_for(speaker) if speaker else None
     if not vid or not eltts.available():
         return JSONResponse({"error": "no cloned voice available"}, status_code=503)
+    if cached_only:
+        audio = eltts.cached(text, vid)
+        if audio is None:
+            return JSONResponse({"error": "not cached"}, status_code=404)
+        return Response(content=audio, media_type="audio/mpeg", headers={"X-TTS-Cached": "True"})
     try:
         audio, cached, secs = eltts.synth(text, vid)
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=502)
     return Response(content=audio, media_type="audio/mpeg", headers={"X-TTS-Cached": str(cached), "X-TTS-Seconds": f"{secs:.2f}"})
+
+
+@app.get("/api/tts_stream")
+def api_tts_stream(text: str, voice: str = None):
+    """/api/tts for text that is not cached, streamed: the browser starts playing on the first chunk instead of after the
+    whole clip. Cached text is served whole. An upstream failure is logged and shown; the UI then falls back."""
+    from fastapi.responses import Response
+    speaker = voice or STATE.get("voice")
+    vid = eltts.voice_for(speaker) if speaker else None
+    if not vid or not eltts.available():
+        return JSONResponse({"error": "no cloned voice available"}, status_code=503)
+    audio = eltts.cached(text, vid)
+    if audio is not None:
+        return Response(content=audio, media_type="audio/mpeg", headers={"X-TTS-Cached": "True"})
+    def gen():
+        try:
+            yield from eltts.synth_stream(text, vid)
+        except Exception as e:  # not GeneratorExit: a client that stops listening is not an error
+            traceback.print_exc()
+            broadcast({"type": "error", "message": f"ElevenLabs stream failed for {text!r}: {e}"})
+            raise
+    return StreamingResponse(gen(), media_type="audio/mpeg", headers={"X-TTS-Cached": "False", "Cache-Control": "no-store"})
 
 
 @app.get("/api/say")
@@ -435,17 +463,20 @@ def api_say(text: str, emotion: str = "neutral", intensity: float = 0.0, rate: f
     plan = eltts.plan_delivery(text, emotion, intensity, rate)
     report = {"emotion": emotion, "intensity": intensity, "rate": rate, "tag": plan["tag"], "model": plan["model"], "stability": plan["settings"]["stability"],
               "cached": cached, "t_synth": round(time.time() - t0, 2), "retime": {"applied": False}}
-    wav, sr = prosody.mp3_to_wav(mp3)
     timing = LAST.get("timing") if utt_id and utt_id == LAST.get("utt_id") else None
-    if retime and timing and timing.get("words"):
-        t1 = time.time()
-        try:
-            aw = prosody.align_audio_words(wav, sr, [w["word"] for w in timing["words"]])
-            wav, rep = prosody.retime(wav, sr, aw, timing["words"], timing["pauses"])
-            rep["audio_words"] = aw; rep["t"] = round(time.time() - t1, 2)
-            report["retime"] = rep
-        except Exception as e:
-            report["retime"] = {"applied": False, "reason": str(e)}
+    if not (retime and timing and timing.get("words")):  # nothing to retime: the clip as synthesized, no mp3 -> wav decode
+        report["total"] = round(time.time() - t0, 2)
+        broadcast({"type": "delivery", "utt_id": utt_id, **report})
+        return Response(content=mp3, media_type="audio/mpeg", headers={"X-Delivery": json.dumps({k: v for k, v in report.items() if k != "retime"})})
+    wav, sr = prosody.mp3_to_wav(mp3)
+    t1 = time.time()
+    try:
+        aw = prosody.align_audio_words(wav, sr, [w["word"] for w in timing["words"]])
+        wav, rep = prosody.retime(wav, sr, aw, timing["words"], timing["pauses"])
+        rep["audio_words"] = aw; rep["t"] = round(time.time() - t1, 2)
+        report["retime"] = rep
+    except Exception as e:
+        report["retime"] = {"applied": False, "reason": str(e)}
     report["total"] = round(time.time() - t0, 2)
     broadcast({"type": "delivery", "utt_id": utt_id, **report})
     return Response(content=prosody.wav_bytes(wav, sr), media_type="audio/wav", headers={"X-Delivery": json.dumps({k: v for k, v in report.items() if k != "retime"})})
@@ -936,6 +967,12 @@ def main():
         STATE["warm"] = True  # engine warmup (above) and aligner prewarm are done: latency measured from now on is steady state
         broadcast({"type": "state", "state": STATE})  # the UI shows "warming up" until this arrives
     threading.Thread(target=_prewarm_aligner, daemon=True).start()
+    def _prewarm_tts():  # the ElevenLabs SDK import and client, and the stock voice list the UI asks for first
+        t = time.time()
+        if eltts.available():
+            eltts.stock_voices()
+        print(f"[tts] ElevenLabs client ready in {time.time() - t:.1f}s (available={eltts.available()})")
+    threading.Thread(target=_prewarm_tts, daemon=True).start()
     import uvicorn
     # an open preview (/stream) never ends on its own: give open connections 3 s on shutdown, then close them
     uvicorn.run(app, host="127.0.0.1", port=args.port, log_level="warning", timeout_graceful_shutdown=3)

@@ -2,9 +2,10 @@
 
   create_voice(speaker, wav_paths)    -> voice_id   (Instant Voice Clone; stored in data/voices/<speaker>.json)
   synth(text, voice_id)               -> mp3 bytes  (cached by sha1(voice_id, text) in data/tts_cache/)
+  synth_stream(text, voice_id)        -> the same, chunk by chunk as it is generated
   prewarm_phrase_bank(voice_id)       -> synthesizes every phrase in phrases.txt so Phrase Mode plays instantly
 """
-import os, json, hashlib, subprocess, time
+import os, json, hashlib, subprocess, tempfile, time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 VOICES_DIR = os.path.join(ROOT, "data", "voices")
@@ -14,14 +15,22 @@ V3_MODEL = "eleven_v3"
 TAGS = {"angry": ("[angry]", "[shouting]"), "warm": ("[warm]", "[cheerful]"), "sad": ("[sad]", "[sad] [whispers]"), "surprised": ("[surprised]", "[gasps] [surprised]")}
 
 
+_CLIENT = None
+
+
 def _client():
-    from dotenv import load_dotenv
-    load_dotenv(os.path.join(ROOT, ".env"))
-    key = os.environ.get("ELEVENLABS_API_KEY") or os.environ.get("ELEVEN_LABS_API_KEY", "")
-    if not key:
-        return None
-    from elevenlabs.client import ElevenLabs
-    return ElevenLabs(api_key=key)
+    """One client per process: its HTTPS connection pool stays warm. A client per request paid a TLS handshake each time,
+    and the first request after startup paid the SDK import too (the server warms it at startup)."""
+    global _CLIENT
+    if _CLIENT is None:
+        from dotenv import load_dotenv
+        load_dotenv(os.path.join(ROOT, ".env"))
+        key = os.environ.get("ELEVENLABS_API_KEY") or os.environ.get("ELEVEN_LABS_API_KEY", "")
+        if not key:
+            return None
+        from elevenlabs.client import ElevenLabs
+        _CLIENT = ElevenLabs(api_key=key)
+    return _CLIENT
 
 
 def available():
@@ -138,11 +147,30 @@ def _cache_path(voice_id, text, model=TTS_MODEL, bucket="n", speed=1.0):
     return os.path.join(CACHE_DIR, f"{h}.mp3")
 
 
+def _plan(text, voice_id, emotion, intensity, rate):
+    """-> (ElevenLabs request plan, its cache file)"""
+    plan = plan_delivery(text, emotion, intensity, rate)
+    return plan, _cache_path(voice_id, text, plan["model"], plan["bucket"], plan["settings"]["speed"])
+
+
+def _store(path, audio):
+    """Write a cache file atomically: a concurrent reader never sees half a clip."""
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=CACHE_DIR, suffix=".part")
+    with os.fdopen(fd, "wb") as f:
+        f.write(audio)
+    os.replace(tmp, path)
+
+
+def cached(text, voice_id, emotion="neutral", intensity=0.0, rate=1.0):
+    """The cached mp3 for this request, or None."""
+    p = _plan(text, voice_id, emotion, intensity, rate)[1]
+    return open(p, "rb").read() if os.path.exists(p) else None
+
+
 def synth(text, voice_id, use_cache=True, emotion="neutral", intensity=0.0, rate=1.0):
     """Returns (mp3_bytes, from_cache, seconds). Emotion/intensity/rate map to a v3 audio tag + stability + speed."""
-    os.makedirs(CACHE_DIR, exist_ok=True)
-    plan = plan_delivery(text, emotion, intensity, rate)
-    p = _cache_path(voice_id, text, plan["model"], plan["bucket"], plan["settings"]["speed"])
+    plan, p = _plan(text, voice_id, emotion, intensity, rate)
     if use_cache and os.path.exists(p):
         return open(p, "rb").read(), True, 0.0
     c = _client()
@@ -151,9 +179,23 @@ def synth(text, voice_id, use_cache=True, emotion="neutral", intensity=0.0, rate
     t0 = time.time()
     audio = b"".join(c.text_to_speech.convert(voice_id=voice_id, text=plan["text"], model_id=plan["model"], output_format="mp3_44100_128",
                                               voice_settings=plan["settings"]))
-    with open(p, "wb") as f:
-        f.write(audio)
+    _store(p, audio)
     return audio, False, time.time() - t0
+
+
+def synth_stream(text, voice_id):
+    """Neutral speech, yielded chunk by chunk as ElevenLabs generates it (the same request as synth), for text that is not
+    cached. The clip is cached only once the stream has completed: one the client dropped or that failed upstream is not."""
+    plan, p = _plan(text, voice_id, "neutral", 0.0, 1.0)
+    c = _client()
+    if c is None:
+        raise RuntimeError("ELEVENLABS_API_KEY not set in .env")
+    chunks = []
+    for chunk in c.text_to_speech.stream(voice_id=voice_id, text=plan["text"], model_id=plan["model"], output_format="mp3_44100_128",
+                                         voice_settings=plan["settings"]):
+        chunks.append(chunk)
+        yield chunk
+    _store(p, b"".join(chunks))
 
 
 def prewarm_phrase_bank(voice_id, phrases=None, expressive=True):

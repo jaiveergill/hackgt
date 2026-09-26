@@ -56,7 +56,9 @@ const V=Date.now();document.write(`<link rel="stylesheet" href="/static/app.css?
         <label>voice <select id="voice"></select></label>
         <button class="btn sm" id="clonebtn">🎙 Clone my voice</button><span id="clonestat" class="small"></span>
         <label><input type="checkbox" id="autospeak" checked> speak automatically</label>
-        <label><input type="checkbox" id="expressive" checked> match my face and pace</label>
+        <label title="The voice takes the emotion the camera reads on the face"><input type="checkbox" id="expressive" checked> match my face</label>
+        <label title="Stretch the voice to the timing of the mouthing. Aligning and retiming the audio takes 0.4-1.8 s per phrase before it can play (measured, plans/PLAN_5_LATENCY.md)"><input type="checkbox" id="pace"> match my pace (slower)</label>
+        <span id="bankstat" class="small"></span>
       </div>
     </details>
   </div>
