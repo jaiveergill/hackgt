@@ -271,7 +271,7 @@ class StreamSource(VideoSource):
     def __init__(self, url, timeout=5.0):
         url, _, query = url.partition("?")
         if not url.startswith("http"):
-            url = f"http://{url}:81/stream"
+            url = f"http://{url}" if ("/" in url or ":" in url) else f"http://{url}:81/stream"   # bare host -> the ESP32 default
         self.settings = dict(self.DEFAULT_SETTINGS) if not url.startswith("http") or ":81/stream" in url else {}
         for kv in query.split("&"):
             if "=" in kv:
@@ -401,6 +401,9 @@ def make_source(spec, width=640, height=480, face_fn=None):
     spec = str(spec if spec is not None else "webcam").strip()
     if spec.lstrip("-").isdigit():
         spec = f"webcam:{spec}"
+    import re as _re
+    if spec.startswith(("http://", "https://")) or _re.match(r"^\d{1,3}(\.\d{1,3}){3}(:\d+)?(/.*)?$", spec):
+        spec = "stream:" + spec   # a bare URL or IP means the network camera
     kind, _, arg = spec.partition(":")
     kind = kind.lower()
     if kind == "webcam":
