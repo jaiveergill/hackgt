@@ -156,22 +156,26 @@ class VSREngine:
         return ctc.tolist()
 
     @torch.no_grad()
-    def score_phrases(self, enc, phrases, prefilter=48):
+    def score_phrases(self, enc, phrases, prefilter=48, always=()):
         """Exact log p(phrase | video) under the pretrained model for every candidate phrase.
 
         Returns list of dicts sorted by combined score (descending):
           {phrase, att: attention-decoder log-lik, ctc: CTC log-lik, score: (1-w)*att + w*ctc, n_tok}
         Same weighting the beam search uses, so scores are comparable to beam hypotheses.
         With a big inventory, only the top `prefilter` phrases by CTC score get the (expensive) attention decoder;
-        the rest are returned with a CTC-only estimate flagged `prefiltered_out`.
+        the rest are returned with a CTC-only estimate flagged `prefiltered_out`. Phrases in `always` (the ones an enrolled
+        patient's templates support, see decoder.py) get the attention decoder whatever their CTC rank.
         """
         if prefilter and len(phrases) > prefilter:
             ctc_all = self.ctc_scores(enc, phrases)
             order = sorted(range(len(phrases)), key=lambda i: -ctc_all[i])
             keep = [phrases[i] for i in order[:prefilter]]
+            keep += [p for p in always if p not in keep]
             res = self._score_phrases_full(enc, keep)
             floor = min(r["score"] for r in res)
             for i in order[prefilter:]:
+                if phrases[i] in always:
+                    continue
                 res.append({"phrase": phrases[i], "att": None, "ctc": ctc_all[i], "score": min(ctc_all[i], floor) - 1.0, "n_tok": 0, "prefiltered_out": True})
             return res
         return self._score_phrases_full(enc, phrases)
