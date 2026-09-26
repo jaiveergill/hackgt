@@ -25,6 +25,7 @@ class VideoSource:
     mirror = False
     discontinuity = False
     finished = False  # a non-looping file reached its end
+    stall_s = 1.5     # seconds without frames before the camera process reports a stall and reopens the source
 
     def open(self):
         raise NotImplementedError
@@ -263,6 +264,7 @@ class StreamSource(VideoSource):
     Frames are stamped at arrival time. The head camera looks at the patient, so the preview is not mirrored."""
     kind = "stream"
     mirror = False
+    stall_s = 8.0   # WiFi hiccups of 0.5-3 s are normal on a hotspot; reopening the TCP stream during one turns them into 10 s outages
 
     DEFAULT_SETTINGS = {"framesize": 9, "quality": 16}
 
@@ -276,21 +278,24 @@ class StreamSource(VideoSource):
                 k, v = kv.split("=", 1); self.settings[k] = v
         self.url, self.timeout = url, timeout
         self._frame, self._ts, self._seq, self._got = None, 0.0, 0, 0
-        self._stop, self._thread, self._err = False, None, None
+        self._stop, self._thread, self._err, self._resp = False, None, None, None
         self.width = self.height = 0
         self.fps_est = 0.0
+        self._configured = False
 
     def _configure(self):
         """ESP32-CAM: push frame size / JPEG quality through /control on the board's :80 server (they reset on reboot)."""
         import urllib.request, urllib.parse
-        if not self.settings:
+        if not self.settings or self._configured:   # the board keeps settings until it reboots; don't spend 2 requests per reopen
             return
+        self._configured = True
         u = urllib.parse.urlsplit(self.url)
         base = f"{u.scheme}://{u.hostname}"
         for k, v in self.settings.items():
             try:
-                urllib.request.urlopen(f"{base}/control?var={k}&val={v}", timeout=3).read()
+                urllib.request.urlopen(f"{base}/control?var={k}&val={v}", timeout=2).read()
             except Exception as e:
+                self._configured = False
                 print(f"[source] could not set {k}={v} on {base}: {e}")
         time.sleep(0.3)
 
@@ -306,6 +311,7 @@ class StreamSource(VideoSource):
         ctype = resp.headers.get("Content-Type", "")
         if "multipart" not in ctype:
             raise RuntimeError(f"{self.url} is not an MJPEG stream (Content-Type {ctype!r})")
+        self._resp = resp
         import threading
         self._thread = threading.Thread(target=self._reader, args=(resp,), daemon=True)
         self._thread.start()
@@ -360,7 +366,22 @@ class StreamSource(VideoSource):
         return True, self._frame, self._ts
 
     def release(self):
+        """Shut the socket down so the reader thread's blocking recv returns and the board sees the client go away at once.
+        The ESP32 stream handler serves one client and only notices a dead socket when its write fails; a half-open old
+        connection blocks the new one until then."""
+        import socket
         self._stop = True
+        resp, self._resp = self._resp, None
+        if resp is not None:
+            try:
+                sock = resp.fp.raw._sock
+                sock.shutdown(socket.SHUT_RDWR)
+            except Exception:
+                pass
+            try: resp.close()
+            except Exception: pass
+        if self._thread is not None:
+            self._thread.join(timeout=1.0)
 
     def reopen(self):
         self.release()
