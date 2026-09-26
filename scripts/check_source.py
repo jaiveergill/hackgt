@@ -9,7 +9,7 @@ Boots the real server with `--source file:<clip>` (looping, real time) and compa
 Also checks POST /api/source rejects a bad spec / missing file with a visible error and recovers.
 Prints expected vs actual and exits 1 on failure. Shares smoke.py's machine-wide lock (8 GB RAM).
 """
-import argparse, fcntl, json, os, socket, subprocess, sys, threading, time, urllib.parse, urllib.request
+import argparse, fcntl, json, math, os, socket, subprocess, sys, threading, time, urllib.parse, urllib.request
 from websockets.sync.client import connect
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -87,15 +87,26 @@ def main():
         print(f"reference decode_file: {ref_text!r}")
         check(code == 200 and args.expect in ref_text.upper(), f"reference contains {args.expect!r}")
 
-        # 2. manual listen over exactly one play-through (start in the still gap before the clip restarts)
-        fps, plays = cam["source"]["fps"], cam["source"]["plays"]
-        n_frames = int(subprocess.run(["ffprobe", "-v", "error", "-count_frames", "-select_streams", "v", "-show_entries",
-                                       "stream=nb_read_frames", "-of", "csv=p=0", os.path.join(ROOT, clip)], capture_output=True, text=True).stdout.strip())
-        while (src := state()["source"])["plays"] == plays:
-            time.sleep(0.05)
+        # 2. manual listen over exactly one play-through. Timing uses t_play, which the file source stamps on its own clock,
+        # so it is exact however late the preview metadata carrying it arrives. The period (clip + gap) is measured from two
+        # consecutive t_play values, not from a frame count, since ffprobe and OpenCV can count frames differently.
+        plays_seen = [state()["source"]["t_play"]]
+        while len(plays_seen) < 3:  # three distinct play starts -> two periods
+            t = state()["source"]["t_play"]
+            if t != plays_seen[-1]:
+                plays_seen.append(t)
+            time.sleep(0.1)
+        period = plays_seen[-1] - plays_seen[-2]
+        t_next = plays_seen[-1] + math.ceil((time.time() + 1.5 - plays_seen[-1]) / period) * period  # a replay >= 1.5 s away
+        time.sleep(max(t_next - min(args.gap / 2, 1.0) - time.time(), 0))
         t0 = time.time()
-        ws.send(json.dumps({"cmd": "start"}))  # we are in the still gap; the clip's frame 0 is due at t_play
-        time.sleep(max(src["t_play"] + n_frames / fps + 0.05 - time.time(), 0))
+        ws.send(json.dumps({"cmd": "start"}))  # inside the still gap before the replay
+        fps_seen = []  # capture fps while the clip plays: the capture loop must not stall even if the server is busy
+        clip_s = period - args.gap
+        while time.time() < t_next + clip_s + 0.05:
+            if time.time() > t_next + 0.5:
+                fps_seen.append(state()["fps"])
+            time.sleep(0.2)
         ws.send(json.dumps({"cmd": "stop"}))
         t_stop = time.time()
         r = wait_result(t0, 30)
@@ -103,11 +114,17 @@ def main():
         print(f"live manual: {live!r} (n_frames={r and r.get('n_frames')}, stop->result {time.time() - t_stop:.2f}s, "
               f"latency={r and r.get('latency')}, camera fps={state()['fps']}, load={os.getloadavg()[0]:.1f})")
         check(r is not None and r["type"] == "result" and args.expect in live.upper(), f"live manual listen contains {args.expect!r}")
+        load1, cores = os.getloadavg()[0], os.cpu_count() or 8
+        fps_msg = f"capture fps during the clip >= 20: {fps_seen} (previews dropped so far: {state()['preview_dropped']}, load {load1:.1f})"
+        if load1 > cores:  # CPU-starved by other processes: an fps floor is meaningless (same rule as smoke.py)
+            print("SKIP " + fps_msg)
+        else:
+            check(fps_seen and min(fps_seen) >= 20, fps_msg)
 
         # 3. auto-listen for a few loops
         ws.send(json.dumps({"cmd": "settings", "auto_listen": True}))
         t_auto = time.time()
-        time.sleep(args.auto_loops * (args.gap + n_frames / fps) + 3.0)
+        time.sleep(args.auto_loops * period + 3.0)
         ws.send(json.dumps({"cmd": "settings", "auto_listen": False}))
         time.sleep(2.0)
         with lock_ev:
@@ -128,6 +145,12 @@ def main():
         cam = state()
         check(code == 400 and any("not found" in m for m in errs) and cam["source"]["path"] == clip,
               f"missing file -> 400 + error event, current source kept: {code} {errs} {cam['source']['path']}")
+        # a source that passes validation but fails to open (no camera index 7) must leave the working source running
+        code, body = http("POST", f"{base}/api/source?spec=webcam:7", timeout=90)
+        time.sleep(1.0)
+        cam = state()
+        check(code == 400 and cam["source"]["path"] == clip and cam["fps"] > 0,
+              f"failed switch keeps the current source: {code} {body} -> {cam['source'].get('path')} fps={cam['fps']}")
         t_sw = time.time()
         code, body = http("POST", f"{base}/api/source?spec=" + urllib.parse.quote(f"file:{clip}?loop=0"))
         print(f"switch to a new source took {time.time() - t_sw:.1f}s")

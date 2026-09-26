@@ -11,3 +11,4 @@ data/session/
 data/voices/
 data/tts_cache/
 models/adapted_*/
+.env.local

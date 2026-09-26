@@ -398,13 +398,17 @@ def api_source(spec: str):
         return JSONResponse({"error": str(e)}, status_code=400)
     if camera is None:
         camera = _make_camera(spec)
+        for _ in range(300):
+            if camera.opened or camera.fatal: break
+            time.sleep(0.1)
+        if not camera.opened:
+            return JSONResponse({"error": camera.fatal or "source did not open in time", "source": spec}, status_code=400)
     else:
-        camera.switch_source(spec)
-    for _ in range(300):
-        if camera.opened or camera.fatal: break
-        time.sleep(0.1)
-    if not camera.opened:
-        return JSONResponse({"error": camera.fatal or "source did not open in time", "source": spec}, status_code=400)
+        try:
+            camera.switch_source(spec)  # make-before-break: on failure the current source keeps running
+        except RuntimeError as e:
+            broadcast({"type": "error", "message": f"video source: {e}"})
+            return JSONResponse({"error": str(e), "source": spec}, status_code=400)
     return {"ok": True, "source": camera.source_info}
 
 
@@ -484,7 +488,11 @@ def _stop_and_decode():
         u = camera.stop_listening()
     except Exception as e:
         set_status("idle"); broadcast({"type": "error", "message": f"camera error: {e}"}); return
-    _decode_utterance(u)
+    _decode_utterance(u, _source_kind())
+
+
+def _source_kind():
+    return (camera.source_info or {}).get("kind", "camera") if camera else "camera"
 
 
 def _make_camera(spec):
@@ -496,7 +504,7 @@ def _make_camera(spec):
 
 def _on_auto_utterance(u):
     set_status("processing", stage="auto")
-    threading.Thread(target=_decode_utterance, args=(u, "webcam-auto"), daemon=True).start()
+    threading.Thread(target=_decode_utterance, args=(u, f"{_source_kind()}-auto"), daemon=True).start()
 
 
 def _decode_utterance(u, source="webcam"):
