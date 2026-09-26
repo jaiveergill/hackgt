@@ -274,6 +274,7 @@ class CameraProcess:
         self.responses = queue.Queue()
         self.listening = False
         self.on_auto_utterance = None
+        self.on_signal = None
         self._quit = False
         threading.Thread(target=self._reader, daemon=True).start()
 
@@ -318,6 +319,9 @@ class CameraProcess:
                     self._send(("auto", True))
             elif msg[0] == "fatal":
                 print("[camera]", msg[1])
+            elif msg[0] == "signal":
+                if self.on_signal:
+                    self.on_signal(msg[1])
             elif msg[0] == "utterance" and len(msg) > 7 and msg[7] == "auto":
                 if self.on_auto_utterance:
                     self.on_auto_utterance(self._utt(msg))

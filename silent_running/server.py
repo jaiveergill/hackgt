@@ -18,6 +18,7 @@ from silent_running.context import ContextStore, OpenAIChooser
 from silent_running.decoder import PhraseDecoder
 from silent_running import tts as eltts
 from silent_running import prosody
+from silent_running import confirm as confirm_mod
 
 STATIC = os.path.join(ROOT, "silent_running", "static")
 app = FastAPI(title="Silent Running")
@@ -28,7 +29,7 @@ PHRASE_GAP_THRESHOLD = 6.0  # nats; free transcript beating every phrase by more
 STATE = {"mode": "phrase", "auto_listen": False, "auto_speak": True, "tts": "browser", "voice": None, "expressive": True, "emotion_override": None, "llm_enabled": True, "status": "idle", "utt_id": 0}
 clients = set()
 loop = None
-engine = camera = context = phrase_decoder = llm = None
+engine = camera = context = phrase_decoder = llm = confirm_loop = None
 phrases = load_phrases()
 PHRASE_TABLE = load_phrase_table()
 CRITICAL = {r["phrase"].lower() for r in PHRASE_TABLE if r["critical"]}
@@ -59,7 +60,7 @@ def set_status(s, **kw):
 
 
 def speak_backend(text):
-    subprocess.Popen(["say", "-v", "Samantha", text])
+    return subprocess.Popen(["say", "-v", "Samantha", text])
 
 
 # ----------------------------------------------------------------------------- decoding pipeline
@@ -106,18 +107,29 @@ def run_decode(rois, n_face, n_total, duration, source="webcam", label=None, t_c
                            "in_inventory": gap < PHRASE_GAP_THRESHOLD,
                            "context": context.snapshot(), "latency_total": t4 - t0})
             result["timing"] = _safe_timing(enc, pd["selected"]); LAST["timing"] = result["timing"]
-            set_status("idle")
-            broadcast({"type": "result", **result, "latency": {"crop": t1 - t0, "encode": t2 - t1, "phrase": t4 - t3, "total": t4 - t0}})
             sel = pd["selected"]
             result["category"] = CATEGORY_OF.get(sel.lower())
             result["critical"] = sel.lower() in CRITICAL and pd["confidence"] >= CRITICAL_CONF
-            if result["critical"]:
-                broadcast({"type": "alert", "utt_id": uid, "text": sel, "confidence": pd["confidence"], "ts": time.time()})
-            if pd["confidence"] >= 0.6 and gap < PHRASE_GAP_THRESHOLD:
-                context.add_history(sel)
-                _log("patient", sel, confidence=pd["confidence"], critical=result["critical"], emotion=(expression or {}).get("emotion"))
-            if STATE["auto_speak"] and STATE["tts"] == "backend":
-                speak_backend(pd["selected"])
+            decision = confirm_mod.plan(result)
+            answered = False
+            if confirm_loop.pending() and sel.lower() in ("yes", "no"):  # a mouthed answer to "Sounds like: X?"
+                if decision["action"] == "speak":
+                    answered = confirm_loop.answer(sel.lower(), source="lips")  # False if the question timed out meanwhile
+                    if answered:
+                        decision.update(action="none", reason=f"answered the open question with a mouthed {sel.lower()}")
+                else:
+                    decision.update(action="none", reason=f"unclear mouthed {sel.lower()} ({pd['confidence']:.0%}); the question stays open")
+            result["action"] = "answer" if answered else decision["action"]
+            set_status("idle")
+            broadcast({"type": "result", **result, "latency": {"crop": t1 - t0, "encode": t2 - t1, "phrase": t4 - t3, "total": t4 - t0}})
+            broadcast(decision)
+            if decision["action"] == "confirm":
+                confirm_loop.start(decision, t0=t0)
+            elif decision["action"] == "speak":
+                confirm_loop.cancel("superseded by a new utterance")
+                _patient_said(sel, uid, result["critical"], pd["confidence"], emotion=(expression or {}).get("emotion"))
+                if STATE["auto_speak"] and STATE["tts"] == "backend":
+                    speak_backend(sel)
             # background: full beam n-best so the UI can show what the open-vocab decoder thought
             threading.Thread(target=_bg_nbest, args=(enc, uid), daemon=True).start()
         else:
@@ -131,6 +143,7 @@ def run_decode(rois, n_face, n_total, duration, source="webcam", label=None, t_c
             result["timing"] = _safe_timing(enc, nbest[0]["text"]); LAST["timing"] = result["timing"]
             set_status("idle")
             broadcast({"type": "result", **result, "latency": {"crop": t1 - t0, "encode": t2 - t1, "beam": t4 - t3, "total": t4 - t0}})
+            confirm_loop.cancel("superseded by a new utterance")
             context.add_history(nbest[0]["text"])
             _log("patient", _pretty(nbest[0]["text"]), confidence=probs[0], mode="open", emotion=(expression or {}).get("emotion"))
             if STATE["auto_speak"] and STATE["tts"] == "backend":
@@ -142,7 +155,8 @@ def run_decode(rois, n_face, n_total, duration, source="webcam", label=None, t_c
 
 def _bg_nbest(enc, uid):
     try:
-        nbest = engine.beam_search(enc, 5)
+        with work_lock:  # ESPnet attention keeps per-call state on the shared module (self.attn): one model call at a time
+            nbest = engine.beam_search(enc, 5)
         probs = _softmax([h["score"] for h in nbest])
         for h, p in zip(nbest, probs):
             h["prob"] = p
@@ -188,6 +202,51 @@ def _word_edits(a, b):
 LAST = {"enc": None, "utt_id": 0}
 
 
+# ----------------------------------------------------------------------------- confirmation loop
+def _confirm_emit(ev):
+    say = ev.get("say")
+    if ev["state"] == "confirmed" and ev["candidate"].lower() in CRITICAL:
+        ev["say"] = None  # the UI's critical alert speaks it; a second copy from the confirm event would overlap
+    broadcast(ev)
+    if say and STATE["auto_speak"] and STATE["tts"] == "backend":
+        p = speak_backend(say)
+        if ev["state"] == "asking":
+            threading.Thread(target=_after_backend_prompt, args=(p, ev), daemon=True).start()
+
+
+def _after_backend_prompt(p, ev):
+    """The server's own voice finished "Sounds like: X?": start the patient's answer window."""
+    if p.wait() == 0:
+        confirm_loop.played(ev["utt_id"], ev["attempt"])
+    else:
+        broadcast({"type": "error", "utt_id": ev["utt_id"], "message": f"backend voice failed (say exit {p.returncode}); confirmation times out unheard"})
+
+
+def _patient_said(text, uid, critical, confidence, **log):
+    """X is now the patient's words: history (context for the next utterance), conversation log, critical escalation."""
+    context.add_history(text)
+    _log("patient", text, confidence=confidence, critical=critical, **log)
+    if critical:
+        broadcast({"type": "alert", "utt_id": uid, "text": text, "confidence": confidence, "ts": time.time()})
+
+
+def _on_confirmed(text, info):
+    """The patient said yes to "Sounds like: X?": X becomes their words."""
+    broadcast({"type": "decision", "utt_id": info["utt_id"], "text": text, "confidence": 1.0, "source": "fused", "provider": "vsr",
+               "reason": f"patient confirmed ({info['by']}) on attempt {info['attempt']}", "alternatives": [], "action": "speak",
+               "latency": info["latency"]})
+    _patient_said(text, info["utt_id"], text.lower() in CRITICAL, 1.0, confirmed=True, by=info["by"], attempt=info["attempt"])
+
+
+def _on_signal(sig):
+    """Nonverbal signal from the camera process: forward to the UI and answer a pending confirmation."""
+    sig = {"type": "signal", "ts": time.time(), **sig}
+    broadcast(sig)
+    ans = confirm_mod.answer_from_signal(sig)
+    if ans:
+        confirm_loop.answer(ans, source=sig["kind"], ts=sig["ts"])
+
+
 def _log(who, text, **kw):
     rec = {"ts": time.time(), "who": who, "text": text, **kw}
     LOG.append(rec); del LOG[:-200]
@@ -231,11 +290,13 @@ def _keep_warm():
     A tiny dummy encode (24 frames) every 0.4 s (0.2 s while listening) keeps the demo path fast."""
     dummy = torch.zeros(1, 24, 88, 88)
     while True:
-        try:
-            if not work_lock.locked():
+        if work_lock.acquire(blocking=False):  # never run beside a real decode (shared attention state)
+            try:
                 engine.encode(dummy)
-        except Exception as e:
-            print("[keepwarm]", e)
+            except Exception as e:
+                print("[keepwarm]", e)
+            finally:
+                work_lock.release()
         time.sleep(0.2 if (camera and camera.listening) else 0.4)
 
 
@@ -386,6 +447,15 @@ def api_state():
             "llm": {"model": llm.model if llm else None, "available": bool(llm and llm.available())}}
 
 
+@app.post("/api/signal")
+def api_signal(kind: str, value: str = None, confidence: float = 1.0):
+    """MOCK: inject a nonverbal signal as if the camera had detected it (e.g. kind=nod). Only with MOCK_SIGNALS=1."""
+    if os.environ.get("MOCK_SIGNALS") != "1":
+        return JSONResponse({"error": "mock signals disabled; start the server with MOCK_SIGNALS=1"}, status_code=403)
+    _on_signal({"kind": kind, "value": value, "confidence": confidence, "mock": True})
+    return {"pending": confirm_loop.pending()}
+
+
 @app.post("/api/decode_file")
 def api_decode_file(path: str, label: str = None):
     """Run the identical pipeline on a video file (for evaluation / fallback demos)."""
@@ -447,8 +517,13 @@ async def ws_endpoint(ws: WebSocket):
                 if t:
                     context.update(last_prompt=t); _log("nurse", t); broadcast({"type": "context", "context": context.snapshot()})
             elif cmd == "confirm":  # user/nurse confirmed a phrase (adds to history)
+                confirm_loop.cancel("nurse picked a phrase")
                 context.add_history(msg.get("text", ""))
                 broadcast({"type": "context", "context": context.snapshot()})
+            elif cmd == "answer":  # the nurse answers "Sounds like: X?" for the patient (Y / N keys)
+                confirm_loop.answer(msg.get("value"), source="nurse")
+            elif cmd == "prompt_played":  # the UI finished playing "Sounds like: X?"; the answer window starts now
+                confirm_loop.played(msg.get("utt_id"), msg.get("attempt"))
             elif cmd == "save_sample":
                 _save_sample(msg.get("phrase", ""), msg.get("speaker", "unknown"))
     except WebSocketDisconnect:
@@ -523,7 +598,7 @@ async def _startup():
 
 
 def main():
-    global engine, camera, context, phrase_decoder, llm
+    global engine, camera, context, phrase_decoder, llm, confirm_loop
     ap = argparse.ArgumentParser()
     ap.add_argument("--camera", type=int, default=-1, help="camera index; -1 = auto-detect first live camera")
     ap.add_argument("--port", type=int, default=8000)
@@ -535,6 +610,7 @@ def main():
     ap.add_argument("--model-dir", default=None, help="VSR checkpoint dir (default models/LRS3_V_WER19.1; use models/adapted_<name> after scripts/adapt.py)")
     ap.add_argument("--voice", default=None, help="default TTS voice: cloned speaker name or stock ElevenLabs voice name (e.g. Bella)")
     ap.add_argument("--no-camera", action="store_true")
+    ap.add_argument("--confirm-timeout", type=float, default=confirm_mod.TIMEOUT, help="seconds to wait for a nod/shake after 'Sounds like: X?'")
     args = ap.parse_args()
     t0 = time.time()
     engine = VSREngine(device=args.device, decode_device=args.decode_device, beam_size=10, ctc_weight=args.ctc_weight, **({"model_dir": args.model_dir} if args.model_dir else {}))
@@ -545,11 +621,13 @@ def main():
     print(f"[engine] loaded + warmed in {time.time()-t0:.1f}s (encoder on {engine.device}, decoder on {engine.decode_device})")
     context = ContextStore()
     phrase_decoder = PhraseDecoder(engine, phrases, context, gamma=args.gamma)
+    confirm_loop = confirm_mod.ConfirmLoop(_confirm_emit, _on_confirmed, timeout=args.confirm_timeout)
     llm = OpenAIChooser(model=args.llm)
     print(f"[llm] openai {args.llm} available={llm.available()}")
     if not args.no_camera:
         camera = CameraProcess(index=args.camera)
         camera.on_auto_utterance = _on_auto_utterance
+        camera.on_signal = _on_signal
         for _ in range(400):  # child imports torch/mediapipe first (~10-20 s)
             if camera.opened: break
             time.sleep(0.1)
