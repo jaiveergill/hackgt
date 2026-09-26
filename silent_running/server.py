@@ -14,6 +14,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 from silent_running.vsr import VSREngine, load_phrases, load_phrase_table, _read_video
 from silent_running.camera_proc import CameraProcess
+from silent_running.signals.aggregate import nonverbal_dict
 from silent_running.context import ContextStore, OpenAIChooser
 from silent_running.decoder import PhraseDecoder
 from silent_running import tts as eltts
@@ -68,7 +69,7 @@ def speak_backend(text, voice="Samantha"):
 
 
 # ----------------------------------------------------------------------------- decoding pipeline
-def run_decode(rois, n_face, n_total, duration, source="webcam", label=None, t_crop=0.0, expression=None):
+def run_decode(rois, n_face, n_total, duration, source="webcam", label=None, t_crop=0.0, expression=None, nonverbal=None):
     """Full pipeline on an utterance's mouth crops. Emits incremental events so the UI can show progress."""
     t_queued = time.time()
     t0 = t_queued - t_crop  # end of the utterance: every latency below includes the wait for work_lock
@@ -93,6 +94,7 @@ def run_decode(rois, n_face, n_total, duration, source="webcam", label=None, t_c
                    "latency": {"lock": wait, "crop": t1 - t0 - wait, "encode": t2 - t1, "greedy": t3 - t2}})
         result = {"utt_id": uid, "mode": STATE["mode"], "raw_greedy": greedy, "n_frames": int(x.shape[1]), "duration": duration, "source": source, "label": label,
                   "expression": expression or {"emotion": "neutral", "intensity": 0.0}}
+        result["nonverbal"] = nonverbal or nonverbal_dict(result["expression"])  # no camera (decode_file): every entry absent
         LAST["enc"] = enc; LAST["utt_id"] = uid
         if not greedy.strip():
             # CTC saw no speech-like mouth movement at all. The attention decoder would hallucinate fluent text here.
@@ -627,7 +629,7 @@ def _source_kind():
 def _make_camera(spec):
     cam = CameraProcess(source=spec)
     cam.on_auto_utterance = _on_auto_utterance
-    cam.on_error = lambda m: broadcast({"type": "error", "message": f"video source: {m}"})
+    cam.on_error = lambda m: broadcast({"type": "error", "message": f"camera: {m}"})  # video source and hand-signal errors
     cam.on_signal = _on_camera_signal
     return cam
 
@@ -643,7 +645,7 @@ def _decode_utterance(u, source="webcam"):
         msgs = {"too short": "Utterance too short. Hold Listen while you mouth the phrase.", "face not tracked": f"Face not tracked well enough ({u['n_face']}/{u['n_total']} frames). Face the camera and try again."}
         broadcast({"type": "error", "message": msgs.get(u["error"], u["error"] or "capture failed")})
         return
-    run_decode(u["rois"], u["n_face"], u["n_total"], u["duration"], source=source, t_crop=u["t_crop"], expression=u.get("expression"))
+    run_decode(u["rois"], u["n_face"], u["n_total"], u["duration"], source=source, t_crop=u["t_crop"], expression=u.get("expression"), nonverbal=u.get("nonverbal"))
 
 
 def _save_sample(phrase, speaker):

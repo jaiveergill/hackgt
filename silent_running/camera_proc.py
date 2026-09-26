@@ -99,8 +99,10 @@ def _worker(conn, spec, width, height, preview_width, buffer_seconds):
     from pipelines.detectors.mediapipe.video_process import VideoProcess  # cv2/skimage only, no torch
     from silent_running.expression import FaceLandmarker, ExpressionTracker
     from silent_running.sources import make_source
+    from silent_running.signals.aggregate import Signals
     fl = FaceLandmarker()
     expr = ExpressionTracker()
+    signals = Signals()
     vp = VideoProcess(convert_gray=True)
 
     t_origin = time.time()  # one clock for every landmarker call (VIDEO mode needs increasing timestamps), probe included
@@ -113,6 +115,7 @@ def _worker(conn, spec, width, height, preview_width, buffer_seconds):
         return
     conn.send(("opened", src.info()))
     out = _Outbox(conn)
+    signals.attach(out.send)  # after "opened": its sends go through the outbox like every other worker message
     STALL_S, MAX_RETRY_S = 1.5, 8.0  # report + reopen a live camera after 1.5 s without frames; back off to 8 s while it stays gone
     last_frame = last_reopen = time.time()
     retry_s = STALL_S
@@ -144,7 +147,7 @@ def _worker(conn, spec, width, height, preview_width, buffer_seconds):
         try:
             t0 = time.time()
             rois = vp(frames, list(lms))
-            out.send(("utterance", rois, n_face, len(lms), dur, None, time.time() - t0, tag, expression))
+            out.send(("utterance", rois, n_face, len(lms), dur, None, time.time() - t0, tag, expression, signals.summary(start, end, expression)))
         except Exception as e:
             out.send(("utterance", None, n_face, len(lms), dur, f"crop failed: {e}", 0.0, tag))
 
@@ -202,6 +205,7 @@ def _worker(conn, spec, width, height, preview_width, buffer_seconds):
             print("[camera] detect failed:", e); lm, bs = None, None
         buffer.append((ts, rgb, lm))
         expr.update(bs, listen_start is not None or auto_start is not None)
+        signals.update(rgb, ts)
         # ---- mouth-motion energy (translation-compensated: patch is re-centred on the mouth every frame)
         patch = None
         if lm is not None:
@@ -265,6 +269,7 @@ def _worker(conn, spec, width, height, preview_width, buffer_seconds):
             cv2.rectangle(frame, (bbox[0], bbox[1]), (bbox[2], bbox[3]), color, 2)
             for p in pts[:3]:
                 cv2.circle(frame, tuple(p), 3, color, -1)
+        signals.draw(frame)
         if listening:
             cv2.circle(frame, (w - 28, 28), 12, (0, 0, 255), -1)
         if preview_width and w != preview_width:
@@ -274,7 +279,7 @@ def _worker(conn, spec, width, height, preview_width, buffer_seconds):
         ok, jpg = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 70])
         meta = {"face": face, "fps": round(fps, 1), "frame_w": w, "frame_h": h, "bbox": bbox, "face_frac": round(face_frac, 3), "listening": listening, "n_frames": n_listen,
                 "auto": auto, "energy": round(energy, 2), "noise": round(noise or 0.0, 2), "mouth_active": bool(auto_start is not None),
-                "expression": expr.live_meta(), "source": src.info(), "preview_dropped": out.dropped}
+                "expression": expr.live_meta(), "source": src.info(), "preview_dropped": out.dropped, "hands": signals.status}
         if ok:
             out.preview(("preview", jpg.tobytes(), meta))
       except (BrokenPipeError, EOFError):
@@ -423,13 +428,17 @@ class CameraProcess:
         elif msg[0] == "utterance" and len(msg) > 7 and msg[7] == "auto":
             if self.on_auto_utterance:
                 self.on_auto_utterance(self._utt(msg))
-        else:
+        elif msg[0] in ("utterance", "snapshot"):  # replies to stop_listening / snapshot_last
             self.responses.put(msg)
+        else:  # a message kind with no handler here must not be taken as the reply to the next request
+            print("[camera] unhandled message from the capture process:", msg[0])
+            if self.on_error:
+                self.on_error(f"unhandled message from the capture process: {msg[0]!r}")
 
     @staticmethod
     def _utt(msg):
         return {"rois": msg[1], "n_face": msg[2], "n_total": msg[3], "duration": msg[4], "error": msg[5], "t_crop": msg[6] if len(msg) > 6 else 0.0,
-                "expression": msg[8] if len(msg) > 8 else None}
+                "expression": msg[8] if len(msg) > 8 else None, "nonverbal": msg[9] if len(msg) > 9 else None}
 
     def set_auto(self, on):
         self._auto = bool(on)
