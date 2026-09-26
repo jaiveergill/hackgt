@@ -17,8 +17,7 @@ selection and `LICENSES.md` for provenance and restrictions (the checkpoint is r
 ```bash
 cd lipread
 uv venv --python 3.12 .venv && source .venv/bin/activate
-uv pip install torch torchvision torchaudio pytorch-lightning sentencepiece av "mediapipe==0.10.21" \
-   opencv-python numpy scipy scikit-image gdown huggingface_hub fastapi "uvicorn[standard]" python-multipart
+uv pip install -r requirements.txt
 # weights (≈1.2 GB): see models/ — downloaded from HF mirror Amanvir/LRS3_V_WER19.1 (+ Auto-AVSR checkpoint via gdown)
 python -m silent_running.server            # http://127.0.0.1:8000
 ```
