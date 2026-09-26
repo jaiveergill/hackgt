@@ -23,6 +23,7 @@ from silent_running import tts as eltts
 from silent_running import prosody
 from silent_running import sessionlog
 from silent_running import confirm as confirm_mod
+from silent_running import captures
 
 STATIC = os.path.join(ROOT, "silent_running", "static")
 app = FastAPI(title="Silent Running")
@@ -33,7 +34,7 @@ PHRASE_GAP_THRESHOLD = 6.0  # nats; free transcript beating every phrase by more
 STATE = {"mode": "phrase", "auto_listen": False, "auto_speak": True, "tts": "browser", "voice": None, "expressive": True, "emotion_override": None, "llm_enabled": True, "status": "idle", "utt_id": 0, "warm": False, "profile": None, "enroll": None}
 clients = set()
 loop = None
-engine = camera = context = phrase_decoder = llm = confirm_loop = None
+engine = camera = context = phrase_decoder = llm = confirm_loop = capture = None
 phrases = load_phrases()
 PHRASE_TABLE = load_phrase_table()
 CRITICAL = {r["phrase"].lower() for r in PHRASE_TABLE if r["critical"]}
@@ -49,6 +50,8 @@ signals = queue.Queue()  # camera signals, handled in arrival order off the came
 
 
 def broadcast(msg):
+    if capture:
+        capture.event(msg)
     try:
         sessionlog.from_broadcast(msg)
     except Exception as e:
@@ -90,6 +93,9 @@ def run_decode(rois, n_face, n_total, duration, source="webcam", label=None, t_c
             return None
         STATE["utt_id"] += 1
         uid = STATE["utt_id"]
+        # live camera only by default: file playback and decode_file are replays of known clips (SR_CAPTURE=all: file playback too)
+        if capture and (source.split("-")[0] in ("webcam", "usb", "stream") or (os.environ.get("SR_CAPTURE") == "all" and source.startswith("file"))):
+            capture.utterance(uid, rois, {"kind": source, **((camera.source_info or {}) if camera else {})})
         set_status("processing", utt_id=uid, stage="encode")
         try:
             x = engine.to_model_input(rois)
@@ -862,6 +868,16 @@ async def ws_endpoint(ws: WebSocket):
                 confirm_loop.cancel("nurse picked a phrase")
                 context.add_history(msg.get("text", ""))
                 broadcast({"type": "context", "context": context.snapshot()})
+            elif cmd == "label":  # "what was actually said" for a captured utterance (data/captures, scripts/captures.py)
+                if capture is None:
+                    await ws.send_text(json.dumps({"type": "error", "message": "label not saved: capture is off (SR_CAPTURE=0)"}))
+                    continue
+                try:
+                    capture.label(msg["utt_id"], msg["text"].strip(), msg.get("by", "ui"))
+                except KeyError as e:  # an utterance this session did not capture (e.g. a file replay)
+                    await ws.send_text(json.dumps({"type": "error", "message": f"label not saved: {e}"}))
+                    continue
+                broadcast({"type": "labeled", "utt_id": msg["utt_id"], "text": msg["text"].strip()})
             elif cmd == "answer":  # the nurse answers "Sounds like: X?" for the patient (Y / N keys)
                 confirm_loop.answer(msg.get("value"), source="nurse")
             elif cmd == "nbest":  # Dev tab: open-vocabulary beam n-best of the last utterance
@@ -959,7 +975,7 @@ async def _startup():
 
 
 def main():
-    global engine, camera, context, phrase_decoder, llm, confirm_loop
+    global engine, camera, context, phrase_decoder, llm, confirm_loop, capture
     ap = argparse.ArgumentParser()
     ap.add_argument("--source", default=None, help="video source: webcam[:N] | usb[:N|name] | file:path.mp4[?loop=0&realtime=0] (default: webcam auto-detect)")
     ap.add_argument("--camera", type=int, default=-1, help="shorthand for --source webcam:N; -1 = auto-detect first live camera")
@@ -990,6 +1006,11 @@ def main():
         except (LookupError, ValueError) as e:
             sys.exit(str(e))
     confirm_loop = confirm_mod.ConfirmLoop(_confirm_emit, _on_confirmed, timeout=args.confirm_timeout)
+    if os.environ.get("SR_CAPTURE", "1") != "0":  # data/captures: every live utterance + corrections (silent_running/captures.py)
+        capture = captures.CaptureLog({"source": args.source or (f"webcam:{args.camera}" if args.camera >= 0 else "webcam"),
+                                       "model_dir": STATE["model_dir"], "profile": args.profile, "n_phrases": len(phrases),
+                                       "scoring": {k: v for k, v in os.environ.items() if k.startswith("SR_")}})
+        print(f"[capture] logging live utterances to {os.path.relpath(capture.path, ROOT)}")
     threading.Thread(target=_signal_worker, daemon=True).start()  # camera signals, including cameras created later via /api/source
     llm = OpenAIChooser(model=args.llm)
     print(f"[llm] openai {args.llm} available={llm.available()}")
