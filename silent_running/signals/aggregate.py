@@ -10,11 +10,10 @@ SR_HANDS_EVERY, MediaPipe error) hands are switched off, the reason goes into `s
 the server; lip reading keeps running.
 """
 import os, traceback
-from silent_running.signals.hands import HandTracker
+from silent_running.signals.hands import HandTracker, KINDS as HAND_KINDS
 
 LOOKBACK = 1.0  # seconds before the utterance window that still count (a patient often shows the gesture, then mouths)
 ABSENT = {"value": None, "confidence": 0.0}
-HAND_KINDS = ("fingers", "thumb", "point")
 
 
 def nonverbal_dict(expression, hands=None):
@@ -24,10 +23,13 @@ def nonverbal_dict(expression, hands=None):
 
 
 class Signals:
-    def __init__(self, send):
-        self.send = send
+    """Built before the video source opens (loading the hand model must not eat into a file source's clock); attach()
+    connects it to the parent once the worker can send."""
+    def __init__(self):
+        self.send = None
         self.hands = None
         self.frame_i = 0
+        self.error = None
         self.status = "off: disabled by SR_HANDS=0"
         if os.environ.get("SR_HANDS", "1") != "0":
             try:
@@ -40,11 +42,19 @@ class Signals:
                 self._fail(e)
         print(f"[signals] hands {self.status}" + (f", every {self.hands_every} frames" if self.hands else ""))
 
+    def attach(self, send):
+        """Send live signals and errors through `send` from now on, starting with a startup failure if there was one."""
+        self.send = send
+        if self.error:
+            send(("error", self.error))
+
     def _fail(self, e):
         traceback.print_exc()
         self.hands = None
         self.status = f"off: {type(e).__name__}: {e}"
-        self.send(("error", f"hand signals {self.status}"))
+        self.error = f"hand signals {self.status}"
+        if self.send:
+            self.send(("error", self.error))
 
     def update(self, rgb, ts):
         self.frame_i += 1
@@ -58,7 +68,7 @@ class Signals:
             self.send(("signal", sig))
 
     def summary(self, start, end, expression):
-        return nonverbal_dict(expression, self.hands.summary(start - LOOKBACK, end) if self.hands else None)
+        return nonverbal_dict(expression, self.hands.summary(start, end, LOOKBACK) if self.hands else None)
 
     def draw(self, bgr):
         if self.hands:
