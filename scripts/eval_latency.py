@@ -109,6 +109,14 @@ def main():
                 m["_t"] = time.time()
                 events.append(m)
         threading.Thread(target=record, daemon=True).start()
+        metas = []  # /ws_meta at 10 Hz: the capture process's state (auto-listen, motion energy, fps), for diagnosis
+
+        def record_meta():
+            with connect(f"ws://127.0.0.1:{port}/ws_meta", max_size=None) as wm:
+                while not stop.is_set():
+                    m = json.loads(wm.recv())
+                    metas.append({"_t": time.time(), **{k: m.get(k) for k in ("status", "auto", "listening", "mouth_active", "energy", "noise", "fps", "face", "n_frames")}})
+        threading.Thread(target=record_meta, daemon=True).start()
         page = Page(a.chrome or find_chrome(None))
         page.call("Page.enable")
         page.call("Page.navigate", url=base + "/")
@@ -146,7 +154,7 @@ def main():
         except subprocess.TimeoutExpired:
             srv.kill(); srv.wait()
     leaked = subprocess.run(["pgrep", "-f", "silent_running.server"], capture_output=True, text=True).stdout.split()
-    json.dump({"clips": clips, "t_play": t_play, "events": events, "marks": marks, "loads": loads}, open(os.path.join(os.path.dirname(video), "raw.json"), "w"))
+    json.dump({"clips": clips, "t_play": t_play, "events": events, "marks": marks, "loads": loads, "metas": metas}, open(os.path.join(os.path.dirname(video), "raw.json"), "w"))
     print(f"server exit {srv.returncode}; silent_running.server processes left: {leaked or 'none'}")
 
     rows = []
