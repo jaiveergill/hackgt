@@ -12,6 +12,8 @@ component so we know what could and could not be commercialized later.
 | Chaplin pipeline code (`third_party/chaplin`) | [amanvirparhar/chaplin](https://github.com/amanvirparhar/chaplin) | MIT (Chaplin); vendored `pipelines/` and `espnet/` files carry Apache-2.0 headers (Imperial College / ESPnet) | Reference webcam → MediaPipe → mouth ROI → ESPnet beam search pipeline. We patched `espnet/nets/ctc_prefix_score.py` for MPS. |
 | `Visual_Speech_Recognition_for_Multiple_Languages` (`third_party/vsr_multi`) | mpc001 | Custom non-commercial license (see above) | Cloned for reference only. |
 | MediaPipe face detection (0.10.21) | Google | Apache-2.0 | Legacy `solutions` API, needed by the crop pipeline. |
+| MediaPipe Hand Landmarker model `models/hand_landmarker.task` | Google, [official float16/latest download](https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task) | Apache-2.0 | Hand signals (`silent_running/signals/hands.py`). Committed unmodified. |
+| **HaGRID annotations → `data/gestures/hagrid/labels.json`** | [HaGRID](https://github.com/hukenovs/hagrid) (Kapitanov, Kvanchiani, Nagaev, Kraynov, Makhliarchuk; SberDevices), via the 30k-sample 384p mirror [cj-mills/hagrid-sample-30k-384p](https://huggingface.co/datasets/cj-mills/hagrid-sample-30k-384p) | **CC BY-SA 4.0** | `labels.json` is a derivative of the HaGRID annotations (gesture label, hand box, dev/test split by HaGRID user id, zip offsets), so **that file is licensed CC BY-SA 4.0 (ShareAlike)**; changes: 520 of the 30k photos selected, one hand box per photo kept. The photos themselves are not committed; `scripts/fetch_hagrid.py` downloads them for evaluation only. |
 | ESPnet | espnet | Apache-2.0 | Vendored subset inside Chaplin. |
 | PyTorch, torchvision, torchaudio, OpenCV, PyAV, scikit-image, sentencepiece | various | BSD/Apache/MIT/LGPL (PyAV, FFmpeg) | Standard. |
 | macOS `say` / browser `speechSynthesis` | Apple / browser vendor | OS-provided | TTS. |
@@ -26,3 +28,4 @@ component so we know what could and could not be commercialized later.
 ## Sample media used for testing
 
 * `data/samples/ted*.mp4`: short excerpts of public TED talks downloaded from YouTube, used solely as local test inputs to prove the pipeline (video track only, audio stripped). Not redistributed.
+* Unseen false-trigger footage for the hand signals (not committed, first 120 s of each, fetched from Wikimedia Commons): "Interview on extreme weather with physical geographer Hannah Cloke – The Royal Society" (CC BY 3.0, The Royal Society), "Internet Hall of Fame 2014 Michael Kende interview" (CC BY 3.0, ImaginingtheInternet), "Interview with a Teacher - Glen Caruso" (CC0, Chase Bohannon, Glen Caruso).

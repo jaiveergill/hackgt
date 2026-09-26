@@ -14,6 +14,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 from silent_running.vsr import VSREngine, load_phrases, load_phrase_table, _read_video
 from silent_running.camera_proc import CameraProcess
+from silent_running.signals.aggregate import nonverbal_dict
 from silent_running.context import ContextStore, OpenAIChooser
 from silent_running.decoder import PhraseDecoder
 from silent_running import tts as eltts
@@ -85,7 +86,8 @@ def run_decode(rois, n_face, n_total, duration, source="webcam", label=None, t_c
         broadcast({"type": "raw", "utt_id": uid, "stage": "greedy", "text": greedy, "n_frames": int(x.shape[1]), "duration": duration,
                    "latency": {"crop": t1 - t0, "encode": t2 - t1, "greedy": t3 - t2}})
         result = {"utt_id": uid, "mode": STATE["mode"], "raw_greedy": greedy, "n_frames": int(x.shape[1]), "duration": duration, "source": source, "label": label,
-                  "expression": expression or {"emotion": "neutral", "intensity": 0.0}, "nonverbal": nonverbal}
+                  "expression": expression or {"emotion": "neutral", "intensity": 0.0}}
+        result["nonverbal"] = nonverbal or nonverbal_dict(result["expression"])  # no camera (decode_file): every entry absent
         LAST["enc"] = enc; LAST["utt_id"] = uid
         if not greedy.strip():
             # CTC saw no speech-like mouth movement at all. The attention decoder would hallucinate fluent text here.

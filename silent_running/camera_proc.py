@@ -181,7 +181,7 @@ def _worker(conn, index, width, height, preview_width, buffer_seconds):
             print("[camera] detect failed:", e); lm, bs = None, None
         buffer.append((ts, rgb, lm))
         expr.update(bs, listen_start is not None or auto_start is not None)
-        signals.update(rgb, ts, lm)
+        signals.update(rgb, ts)
         # ---- mouth-motion energy (translation-compensated: patch is re-centred on the mouth every frame)
         patch = None
         if lm is not None:
@@ -254,7 +254,7 @@ def _worker(conn, index, width, height, preview_width, buffer_seconds):
         ok, jpg = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 70])
         meta = {"face": face, "fps": round(fps, 1), "frame_w": w, "frame_h": h, "bbox": bbox, "face_frac": round(face_frac, 3), "listening": listening, "n_frames": n_listen,
                 "auto": auto, "energy": round(energy, 2), "noise": round(noise or 0.0, 2), "mouth_active": bool(auto_start is not None),
-                "expression": expr.live_meta()}
+                "expression": expr.live_meta(), "hands": signals.status}
         if ok:
             conn.send(("preview", jpg.tobytes(), meta))
       except (BrokenPipeError, EOFError):
