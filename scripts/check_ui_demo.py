@@ -119,7 +119,8 @@ FUZZ_JS = """(()=>{const P='<img src=x onerror="window.__xss=(window.__xss||0)+1
     ranking:[{phrase:P,vsr_prob:.5,final_prob:.5,prior:1,reasons:[P],vsr_score:-1,att:-1,ctc:-1}],n_frames:10,duration:1,expression:ex,timing:tm,latency:lat,nonverbal:nv},
    {type:'delivery',utt_id:u+1,emotion:P,intensity:.5,model:P,tag:P,stability:P,rate:1,cached:false,t_synth:P,total:P,retime:{applied:true,global:P,audio_words:[{word:P,start:0,end:.5}],ratios:[1]}},
    {type:'decision',utt_id:u+1,text:P,confidence:.5,source:P,reason:P,provider:P,alternatives:[{text:P,confidence:.2}],action:P},
-   {type:'confirm',utt_id:u+1,candidate:P,attempt:P,state:'asking'},{type:'confirm',utt_id:u+1,candidate:P,attempt:P,state:'rejected'},
+   ...[['asking','rejected','confirmed'],['asking','rejected'],['asking','timeout']].flatMap((states,a)=>states.map(state=>({type:'confirm',utt_id:u+1,candidate:P,attempt:a+1,
+     state,say:P,say_voice:'system',by:P,latency:{answer:1},confidence:.4,timeout:4}))),{type:'nbest',utt_id:u+1,error:P},
    ...['blink_code','fingers','thumb','point'].map(kind=>({type:'signal',kind,value:P,confidence:.9,ts:0})),
    {type:'log',entry:{ts:0,who:P,text:P,confidence:.5,source:P,emotion:P}},{type:'context',context:{notes:P,category:P,last_prompt:P,history:[P]}},
    {type:'alert',utt_id:u+1,text:P},{type:'error',message:P},{type:'saved',file:P,phrase:P},{type:'prewarmed',speaker:P,n:P}].forEach(handle);
@@ -159,7 +160,7 @@ def main():
     chrome, url = find_chrome(args.chrome), serve()
     print(f"chrome: {chrome}\nurl:    {url}")
     page = Page(chrome)
-    fails = 0
+    fails, checks = 0, []  # checks: (name, expected, actual) after the scenes
     try:
         page.call("Page.navigate", url=url)
         t0 = time.time()
@@ -174,7 +175,6 @@ def main():
         fails += not ok
         print(f"{'PASS' if ok else 'FAIL'} {time.time() - t0:5.1f}s {name}\n      expected {exp}" + ("" if ok else f"\n      actual   {got}"))
         page.eval("document.querySelector('#dplay').click()")  # pause the scenes: the rest injects events directly
-        checks = []
         for w, h in ((1920, 1080), (1280, 720)):
             page.call("Emulation.setDeviceMetricsOverride", width=w, height=h, deviceScaleFactor=1, mobile=False)
             page.eval("document.querySelector('#log').innerHTML=''")
@@ -189,7 +189,7 @@ def main():
         exc = list(page.exceptions)
         page.close()
     print(f"page JS exceptions: {exc or 'none'}")
-    n = len(STEPS) + 1 + 4
+    n = len(STEPS) + 1 + len(checks)
     print(f"{n - fails}/{n} steps reached")
     sys.exit(1 if fails or exc else 0)
 
