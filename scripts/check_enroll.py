@@ -7,15 +7,18 @@ half the phrases, and print for each later take the expected phrase vs the gener
 enrolled >= generic overall, and on the phrases that were NOT enrolled (a phrase without takes must not be penalised).
 Part 2, the enrollment flow through the real server.py functions (events captured in-process):
   continuing a complete profile or reps=0 is refused and live utterances are still decoded; the UI state shows the
+  prompt; while enrolling nothing is decoded (second start, decode_file, a queued utterance) and capture errors keep the
   prompt; a take that contradicts the phrase's earlier take is rejected; undo re-prompts; starting enrollment cancels a
   pending confirmation and takes never produce a decision or confirmation; a profile switch requested mid-decode waits
-  for that decode. Prints PASS/FAIL with expected vs actual; exit 1 on any failure.
+  for that decode; a session stopped too early falls back to the generic model. Profiles go to a temporary directory.
+  Prints PASS/FAIL with expected vs actual; exit 1 on any failure.
 """
-import argparse, fcntl, os, sys, threading
+import argparse, fcntl, os, shutil, sys, tempfile, threading
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 from silent_running.vsr import VSREngine
+from silent_running import enroll
 from silent_running.enroll import Profile
 from silent_running.decoder import PhraseDecoder
 from silent_running.context import ContextStore
@@ -76,9 +79,6 @@ def server_flow(engine, clips, inventory):
     S.phrase_decoder = PhraseDecoder(engine, inventory, S.context)
     S.confirm_loop = confirm_mod.ConfirmLoop(S._confirm_emit, S._on_confirmed)
     names = ("check_enroll_full", "check_enroll_new")
-    for n in names:
-        if os.path.exists(Profile(n).path):
-            os.remove(Profile(n).path)
     take = lambda phrase, t: next(c["path"] for c in clips if c["phrase"] == phrase and c["take"] == t)
     types = lambda: [e["type"] for e in events]
 
@@ -105,6 +105,17 @@ def server_flow(engine, clips, inventory):
           "starting enrollment cancels the open question", "no pending question, a rejected confirm event", [(e["type"], e.get("state")) for e in events])
     check(S.STATE["status"] == "enrolling" and S.STATE["enroll"]["prompt"] == inventory[0], "UI state while enrolling",
           f"status enrolling, prompt {inventory[0]!r}", f"{S.STATE['status']}, {S.STATE['enroll'] and S.STATE['enroll']['prompt']!r}")
+
+    # recognition is off while enrolling: no second session, no decode_file, a queued utterance is not decoded
+    for what, r in (("second start while enrolling", S.api_enroll_start(profile=names[0], reps=3)),
+                    ("decode_file while enrolling", S.api_decode_file(path=take(inventory[0], 5)))):
+        check(getattr(r, "status_code", 200) == 409, what, "409", f"{getattr(r, 'status_code', 200)}")
+    events.clear()
+    res = S.run_decode(**utterance(engine, take(inventory[0], 5)))
+    check(res is None and "result" not in types() and S.STATE["status"] == "enrolling", "utterance queued before enrollment started",
+          "not decoded, still enrolling", f"{res and res.get('selected')!r}, {sorted(set(types()))}, {S.STATE['status']}")
+    S._decode_utterance({"rois": None, "error": "too short", "n_face": 0, "n_total": 0})
+    check(S.STATE["status"] == "enrolling", "capture error while enrolling keeps the prompt", "status enrolling", S.STATE["status"])
 
     # round 1: one take of every phrase, in prompt order, through the live-utterance path. A take the server rejects
     # is mouthed again (the next recorded take), as the patient would after seeing the error.
@@ -158,12 +169,18 @@ def server_flow(engine, clips, inventory):
     res = S.run_decode(**utterance(engine, take(inventory[2], 5)))
     seen["thread"].join()
     S.phrase_decoder.decode = orig
-    used = any(r["proto"] != 0.0 for r in res["ranking"])
-    check(seen["blocked"] and res["profile"] == names[1] and used and S.STATE["profile"] is None, "profile switch during a decode",
+    scored = any(r["proto"] != 0.0 for r in res["ranking"])
+    check(seen["blocked"] and res["profile"] == names[1] and scored and S.STATE["profile"] is None, "profile switch during a decode",
           f"switch waits; result labelled {names[1]!r} and scored with it; generic afterwards",
-          f"waited {seen['blocked']}, labelled {res['profile']!r}, evidence used {used}, active after {S.STATE['profile']!r}")
-    for n in names:
-        os.remove(Profile(n).path)
+          f"waited {seen['blocked']}, labelled {res['profile']!r}, evidence used {scored}, active after {S.STATE['profile']!r}")
+
+    # a session that ends before the profile can give evidence falls back to the generic model, not the previous profile
+    S.api_profile(name=names[1])
+    S.api_enroll_start(profile="check_enroll_tiny", reps=1)
+    S._decode_utterance(utterance(engine, take(inventory[0], used[inventory[0]])))
+    r = S.api_enroll_stop()
+    check(not r["activated"] and S.STATE["profile"] is None, "stop with takes of 1 phrase", "not activated, generic model active",
+          f"activated {r['activated']}, active {S.STATE['profile']!r}")
 
 
 def main():
@@ -176,6 +193,7 @@ def main():
     lock = open(os.path.expanduser("~/.cache/silent_running/smoke.lock"), "w")  # same machine-wide lock as smoke.py (8 GB RAM)
     print("waiting for the machine-wide lock ...", flush=True)
     fcntl.flock(lock, fcntl.LOCK_EX)
+    enroll.PROFILE_DIR = tempfile.mkdtemp()  # the check's profiles never touch data/profiles
     clips, inventory = miracl_clips(os.path.expanduser(a.miracl)) if a.miracl else manifest_clips(a.manifest)
     clips = [c for c in clips if c["speaker"] == a.speaker]
     engine = VSREngine()
@@ -183,6 +201,7 @@ def main():
     accuracy(engine, clips, inventory, a.enroll)
     print()
     server_flow(engine, clips, inventory)
+    shutil.rmtree(enroll.PROFILE_DIR)
     print("\nCHECK_ENROLL " + ("PASSED" if not failures else f"FAILED: {failures}"))
     sys.exit(1 if failures else 0)
 

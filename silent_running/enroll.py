@@ -26,6 +26,7 @@ NAME = re.compile(r"[A-Za-z0-9_-]+")
 # log-loss fit on all 8 MIRACL speakers; the held-out (leave-one-speaker-out) numbers are in results/enroll_miracl.md
 SLOPE = float(os.environ.get("ENROLL_SLOPE", "85.1"))   # nats per unit of DTW cosine similarity
 OFFSET = float(os.environ.get("ENROLL_OFFSET", "12.4"))  # nats; the evidence is 0 at s = mu + OFFSET / SLOPE
+MIN_PHRASES = 5  # a profile gives evidence once this many phrases have takes: the smallest profile the held-out eval covers
 
 
 def dtw_similarity(query, templates):
@@ -107,8 +108,8 @@ class Profile:
 
     @property
     def ready(self):
-        """Evidence needs the impostor mean, i.e. takes of at least two phrases."""
-        return self.mu is not None
+        """Evidence needs a calibrated impostor mean: takes of at least MIN_PHRASES phrases."""
+        return len(set(self.phrases)) >= MIN_PHRASES
 
     def add(self, phrase, enc):
         enc = enc.detach().to("cpu", torch.float16).clone()
@@ -139,7 +140,7 @@ class Profile:
     def evidence(self, enc, phrases):
         """-> {phrase: template evidence in nats} for the enrolled phrases among `phrases` (unenrolled phrases: absent = 0)."""
         if not self.ready:
-            raise ValueError(f"profile {self.name!r} needs takes of at least two phrases")
+            raise ValueError(f"profile {self.name!r} needs takes of at least {MIN_PHRASES} phrases")
         wanted = set(phrases)
         idx = [k for k, p in enumerate(self.phrases) if p in wanted]
         if not idx:

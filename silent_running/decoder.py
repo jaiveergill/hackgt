@@ -19,9 +19,10 @@ class PhraseDecoder:
 
     def decode(self, enc):
         t0 = time.time()
-        vsr = self.engine.score_phrases(enc, self.phrases)  # sorted by VSR score
         prof = self.profile  # read once: a profile switch mid-decode must not mix two profiles
         proto = prof.evidence(enc, self.phrases) if prof else {}  # template log-likelihood ratios; unenrolled phrases get 0
+        # sorted by VSR score; a phrase the templates support is scored in full even outside the CTC prefilter
+        vsr = self.engine.score_phrases(enc, self.phrases, always=[p for p, e in proto.items() if e > 0])
         t1 = time.time()
         prior = {p["phrase"]: p for p in self.context.log_prior(self.phrases)}
         vsr_probs = softmax([r["score"] + proto.get(r["phrase"], 0.0) for r in vsr], self.temp)

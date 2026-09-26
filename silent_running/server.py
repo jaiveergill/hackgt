@@ -17,7 +17,7 @@ from silent_running.camera_proc import CameraProcess
 from silent_running.signals.aggregate import nonverbal_dict
 from silent_running.context import ContextStore, OpenAIChooser
 from silent_running.decoder import PhraseDecoder
-from silent_running.enroll import Profile, Enrollment, list_profiles
+from silent_running.enroll import Profile, Enrollment, list_profiles, MIN_PHRASES
 from silent_running import tts as eltts
 from silent_running import prosody
 from silent_running import confirm as confirm_mod
@@ -77,6 +77,11 @@ def run_decode(rois, n_face, n_total, duration, source="webcam", label=None, t_c
     t0 = t_queued - t_crop  # end of the utterance: every latency below includes the wait for work_lock
     with work_lock:
         wait = time.time() - t_queued
+        sess = ENROLL["session"]
+        if sess is not None:  # enrollment started while this utterance waited for the lock: recognition is off
+            broadcast({"type": "error", "message": "utterance not decoded: enrollment started"})
+            _enroll_status(sess)
+            return None
         STATE["utt_id"] += 1
         uid = STATE["utt_id"]
         set_status("processing", utt_id=uid, stage="encode")
@@ -559,6 +564,8 @@ def _file_rois(path):
 @app.post("/api/decode_file")
 def api_decode_file(path: str, label: str = None):
     """Run the identical pipeline on a video file (for evaluation / fallback demos)."""
+    if ENROLL["session"] is not None:
+        return JSONResponse({"error": "enrolling: recognition is off until /api/enroll/stop (use /api/enroll/file to add a take)"}, status_code=409)
     r = _file_rois(path)
     if isinstance(r, JSONResponse):
         return r
@@ -593,15 +600,16 @@ def _enroll_take(sess, rois, phrase=None):
 
 
 def _finish_enrollment(sess, state):
-    """End the session (work_lock held); activate its profile if it can produce evidence (takes of two phrases)."""
+    """End the session (work_lock held) and activate its profile; if it cannot give evidence yet, use the generic model
+    (never the profile that was active before: the patient in front of the camera is the one who was enrolling)."""
     ENROLL["session"] = None
     STATE["enroll"] = None
     sess.profile.save()
     active = sess.profile.ready
-    if active:
-        _set_profile(sess.profile)
-    else:
-        broadcast({"type": "error", "message": f"profile {sess.profile.name!r} saved but not activated: it needs takes of at least two phrases"})
+    _set_profile(sess.profile if active else None)
+    if not active:
+        broadcast({"type": "error", "message": f"profile {sess.profile.name!r} saved but not activated: it needs takes of at least "
+                                              f"{MIN_PHRASES} phrases. Using the generic model."})
     set_status("idle")
     msg = {"type": "enroll", "state": state, "activated": active, **sess.snapshot()}
     broadcast(msg)
@@ -622,7 +630,7 @@ def _load_ready_profile(name):
         raise LookupError(f"no profile {name!r}; have {list_profiles()}")
     prof = Profile.load(name)
     if not prof.ready:
-        raise ValueError(f"profile {name!r} needs takes of at least two phrases; continue enrolling it first")
+        raise ValueError(f"profile {name!r} needs takes of at least {MIN_PHRASES} phrases; continue enrolling it first")
     return prof
 
 
@@ -659,7 +667,9 @@ def api_enroll_start(profile: str, reps: int = 2):
         sess = Enrollment(Profile.load(profile), phrases, reps)
     except ValueError as e:
         return JSONResponse({"error": str(e)}, status_code=400)
-    with work_lock:  # no decode is in flight, so none can start a confirmation after this
+    with work_lock:  # no decode is in flight, and run_decode refuses once the session is set: no confirmation can start
+        if ENROLL["session"] is not None:
+            return JSONResponse({"error": f"already enrolling {ENROLL['session'].profile.name!r}; POST /api/enroll/stop first"}, status_code=409)
         ENROLL["session"] = sess
         confirm_loop.cancel("enrollment started")
         msg = {"type": "enroll", "state": "started", **sess.snapshot()}
@@ -816,6 +826,9 @@ def _decode_utterance(u, source="webcam"):
         set_status("idle")
         msgs = {"too short": "Utterance too short. Hold Listen while you mouth the phrase.", "face not tracked": f"Face not tracked well enough ({u['n_face']}/{u['n_total']} frames). Face the camera and try again."}
         broadcast({"type": "error", "message": msgs.get(u["error"], u["error"] or "capture failed")})
+        sess = ENROLL["session"]
+        if sess is not None:  # keep showing the prompt: the patient mouths it again
+            _enroll_status(sess)
         return
     if _enroll_utterance(u["rois"]):
         return

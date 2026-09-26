@@ -12,10 +12,11 @@ by DTW. Protocols (test = the last two takes of every phrase; profiles are built
 The evidence parameters (SLOPE, OFFSET) are fitted by minimising the log-loss of the decoder's posterior on the other
 speakers' "all K" and "half" instances (leave-one-speaker-out); every number in the tables is on the held-out speaker.
 Then: reliability of the confidence, how often a nurse question can change a decision, the enrollment take gate, a
-real-path check (PhraseDecoder with a real Profile, the server's code path) and latency on real features.
+real-path check (PhraseDecoder with a real Profile, the server's code path), the same clips inside the 204-phrase ICU
+inventory (CTC prefilter path, only these phrases enrolled) and latency on real features.
 Holds the machine-wide lock (the model needs ~2 GB). Writes results/enroll_<tag>.md.
 """
-import argparse, fcntl, hashlib, json, os, sys, time
+import argparse, fcntl, hashlib, json, os, shutil, sys, tempfile, time
 from collections import defaultdict
 import av
 import numpy as np
@@ -25,6 +26,7 @@ import torch.nn.functional as F
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 from silent_running.vsr import VSREngine, load_phrases, _read_video
+from silent_running import enroll
 from silent_running.enroll import Profile, dtw_similarity, impostor_mean, best_per_phrase, SLOPE, OFFSET
 from silent_running.decoder import PhraseDecoder
 from silent_running.context import ContextStore
@@ -150,17 +152,22 @@ def posterior(sc):
     return e / e.sum()
 
 
+def calibration(ok, conf):
+    """Correct flags and top-1 confidences -> accuracy, expected calibration error (10 bins), confident errors."""
+    ok, conf = np.array(ok), np.array(conf)
+    b = np.minimum((conf * 10).astype(int), 9)
+    ece = sum(abs(ok[b == k].mean() - conf[b == k].mean()) * (b == k).sum() for k in range(10) if (b == k).any()) / len(ok)
+    return {"n": len(ok), "acc": ok.mean(), "ece": ece, "wrong": int((~ok).sum()), "w6": int((~ok & (conf >= 0.6)).sum()),
+            "w9": int((~ok & (conf >= 0.9)).sum()), "ok": ok, "conf": conf}
+
+
 def summary(rows):
-    """rows: [(scores, label)] -> accuracy, ECE, confident errors, share of close decisions."""
+    """rows: [(scores, label)] -> calibration() plus the share of close decisions (top-2 margin < 2 nats)."""
     ok, conf, margin = [], [], []
     for sc, y in rows:
         pr = posterior(sc); o = np.sort(sc)
         ok.append(pr.argmax() == y); conf.append(pr.max()); margin.append(o[-1] - o[-2])
-    ok, conf, margin = np.array(ok), np.array(conf), np.array(margin)
-    b = np.minimum((conf * 10).astype(int), 9)
-    ece = sum(abs(ok[b == k].mean() - conf[b == k].mean()) * (b == k).sum() for k in range(10) if (b == k).any()) / len(ok)
-    return {"n": len(ok), "acc": ok.mean(), "ece": ece, "wrong": int((~ok).sum()), "w6": int((~ok & (conf >= 0.6)).sum()),
-            "w9": int((~ok & (conf >= 0.9)).sum()), "close": (margin < 2.0).mean(), "ok": ok, "conf": conf}
+    return {**calibration(ok, conf), "close": (np.array(margin) < 2.0).mean()}
 
 
 def context_flips(rows, inv):
@@ -199,6 +206,7 @@ def main():
     print("waiting for the machine-wide lock ...", flush=True)
     fcntl.flock(lock, fcntl.LOCK_EX)
     print(f"lock acquired, load {os.getloadavg()[0]:.1f}", flush=True)
+    enroll.PROFILE_DIR = tempfile.mkdtemp()  # the eval's profiles never touch data/profiles
     clips, inventory = miracl_clips(os.path.expanduser(a.miracl)) if a.miracl else manifest_clips(a.manifest)
     engine = VSREngine(device=a.device)
     engine.warmup()
@@ -230,9 +238,9 @@ def main():
     final = fit([i for s in speakers for i, tag in per_spk[s] if tag in TRAIN])
 
     n_takes = max(c["take"] for c in clips)
-    L = [f"# Enrollment eval: {a.tag}", "",
-         f"Data: {len(speakers)} speakers x {len(inventory)} phrases x {n_takes} takes ({len(clips)} clips), every take of a speaker from one "
-         f"recording session (so cross-session drift is not measured). Test = takes {a.kmax + 1}-{n_takes} of every phrase; profiles use earlier takes.",
+    L = [f"# Enrollment eval: {a.tag}, {len(speakers)} speakers x {len(inventory)} phrases x {n_takes} takes", "",
+         f"Data: {'the Kaggle MIRACL-VC1 subset (blueguydeez8974/miracl-vc1)' if a.miracl else a.manifest}, {len(clips)} clips, every take of a speaker from one recording session (so cross-session "
+         f"drift is not measured). Test = takes {a.kmax + 1}-{n_takes} of every phrase; profiles use earlier takes.",
          "", "Evidence for an enrolled phrase = SLOPE * (best DTW similarity - the profile's impostor mean) - OFFSET, added to the VSR "
          "log-likelihood; unenrolled phrases get 0. (SLOPE, OFFSET) are fitted by minimising the log-loss of the decoder's posterior "
          f"on the other {len(speakers) - 1} speakers' {', '.join(TRAIN)} instances; every number below is on the held-out speaker.", "",
@@ -308,6 +316,28 @@ def main():
     L += ["", f"Real-path check (PhraseDecoder.decode with a real Profile, all-enrolled and half-enrolled, enroll.py parameters): "
           f"{mism} disagreements with the sweep over {n} decisions, max confidence difference {dconf:.4f}."]
 
+    # ---- large inventory: the ICU phrases + these phrases, through the CTC prefilter; only these phrases have takes
+    icu = load_phrases()
+    big = icu + [p for p in inventory if p not in icu]
+    dec = PhraseDecoder(engine, big, ContextStore())
+    res = {"generic": ([], []), "enrolled": ([], [])}
+    for s in speakers:
+        prof = Profile(f"eval_{s}_big")
+        for j in sw.idx(s, range(1, a.kmax + 1)):
+            prof.add(clips[j]["phrase"], clips[j]["enc"])
+        for q in sw.idx(s, range(a.kmax + 1, n_takes + 1)):
+            for label, pf in (("generic", None), ("enrolled", prof)):
+                dec.profile = pf
+                pd = dec.decode(clips[q]["enc"])
+                res[label][0].append(pd["selected"] == clips[q]["phrase"]); res[label][1].append(pd["confidence"])
+    g, e = (calibration(*res[k]) for k in ("generic", "enrolled"))
+    L += ["", f"Large inventory ({len(big)} phrases = the {len(icu)} ICU phrases + these; CTC prefilter + attention on the top 48 "
+          f"and on every phrase with positive evidence), profile = takes 1-{a.kmax} of these {len(inventory)} phrases only, test takes "
+          f"{a.kmax + 1}-{n_takes}, real PhraseDecoder, enroll.py parameters (fitted on all speakers, so not held out):", "",
+          "| | n | top-1 | ECE | wrong with conf >= 0.6 | wrong with conf >= 0.9 |", "|---|---|---|---|---|---|",
+          f"| generic | {g['n']} | {g['acc']:.3f} | {g['ece']:.3f} | {g['w6']}/{g['wrong']} | {g['w9']} |",
+          f"| enrolled | {e['n']} | **{e['acc']:.3f}** | {e['ece']:.3f} | {e['w6']}/{e['wrong']} | {e['w9']} |"]
+
     # ---- latency on real features (evidence and the whole PhraseDecoder.decode), under this script's lock
     L += ["", f"Latency, real features (MIRACL takes as templates, slices of a TED encoding as queries), median of 5, load {os.getloadavg()[0]:.1f} at start:", "",
           "| inventory | templates | query | evidence ms | decode ms without profile | decode ms with profile |", "|---|---|---|---|---|---|"]
@@ -329,7 +359,7 @@ def main():
             L.append(f"| {n_ph} phrases | {len(prof.phrases)} | {secs} s ({q.shape[0]} frames) | {t_ev:.0f} | {t0d:.0f} | {t1d:.0f} |")
         t = time.time(); prof.save(); t_save = time.time() - t
         L.append(f"| {n_ph} phrases | profile save (per take) | {os.path.getsize(prof.path) / 1e6:.0f} MB | {1000 * t_save:.0f} ms | | |")
-        os.remove(prof.path)
+    shutil.rmtree(enroll.PROFILE_DIR)
     L.append(f"\nLoad at end: {os.getloadavg()[0]:.1f}.")
 
     out = os.path.join(ROOT, "results", f"enroll_{a.tag}.md")
