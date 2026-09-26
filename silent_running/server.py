@@ -508,6 +508,32 @@ def api_signal(kind: str, value: str = None, confidence: float = 1.0):
     return {"pending": confirm_loop.pending()}
 
 
+@app.post("/api/source")
+def api_source(spec: str):
+    """Switch the live video source without restarting (e.g. to a recorded backup): webcam[:N] | usb[:N|name] | file:path.mp4"""
+    global camera
+    from silent_running.sources import make_source
+    try:
+        make_source(spec)  # bad spec or missing file: refuse before tearing down the working source
+    except (ValueError, OSError) as e:
+        broadcast({"type": "error", "message": f"video source: {e}"})
+        return JSONResponse({"error": str(e)}, status_code=400)
+    if camera is None:
+        camera = _make_camera(spec)
+        for _ in range(300):
+            if camera.opened or camera.fatal: break
+            time.sleep(0.1)
+        if not camera.opened:
+            return JSONResponse({"error": camera.fatal or "source did not open in time", "source": spec}, status_code=400)
+    else:
+        try:
+            camera.switch_source(spec)  # make-before-break: on failure the current source keeps running
+        except RuntimeError as e:
+            broadcast({"type": "error", "message": f"video source: {e}"})
+            return JSONResponse({"error": str(e), "source": spec}, status_code=400)
+    return {"ok": True, "source": camera.source_info}
+
+
 @app.post("/api/decode_file")
 def api_decode_file(path: str, label: str = None):
     """Run the identical pipeline on a video file (for evaluation / fallback demos)."""
@@ -591,12 +617,24 @@ def _stop_and_decode():
         u = camera.stop_listening()
     except Exception as e:
         set_status("idle"); broadcast({"type": "error", "message": f"camera error: {e}"}); return
-    _decode_utterance(u)
+    _decode_utterance(u, _source_kind())
+
+
+def _source_kind():
+    return (camera.source_info or {}).get("kind", "camera") if camera else "camera"
+
+
+def _make_camera(spec):
+    cam = CameraProcess(source=spec)
+    cam.on_auto_utterance = _on_auto_utterance
+    cam.on_error = lambda m: broadcast({"type": "error", "message": f"video source: {m}"})
+    cam.on_signal = _on_camera_signal
+    return cam
 
 
 def _on_auto_utterance(u):
     set_status("processing", stage="auto")
-    threading.Thread(target=_decode_utterance, args=(u, "webcam-auto"), daemon=True).start()
+    threading.Thread(target=_decode_utterance, args=(u, f"{_source_kind()}-auto"), daemon=True).start()
 
 
 def _decode_utterance(u, source="webcam"):
@@ -654,7 +692,8 @@ async def _startup():
 def main():
     global engine, camera, context, phrase_decoder, llm, confirm_loop
     ap = argparse.ArgumentParser()
-    ap.add_argument("--camera", type=int, default=-1, help="camera index; -1 = auto-detect first live camera")
+    ap.add_argument("--source", default=None, help="video source: webcam[:N] | usb[:N|name] | file:path.mp4[?loop=0&realtime=0] (default: webcam auto-detect)")
+    ap.add_argument("--camera", type=int, default=-1, help="shorthand for --source webcam:N; -1 = auto-detect first live camera")
     ap.add_argument("--port", type=int, default=8000)
     ap.add_argument("--device", default="mps")
     ap.add_argument("--decode-device", default="cpu")
@@ -676,17 +715,15 @@ def main():
     context = ContextStore()
     phrase_decoder = PhraseDecoder(engine, phrases, context, gamma=args.gamma)
     confirm_loop = confirm_mod.ConfirmLoop(_confirm_emit, _on_confirmed, timeout=args.confirm_timeout)
+    threading.Thread(target=_signal_worker, daemon=True).start()  # camera signals, including cameras created later via /api/source
     llm = OpenAIChooser(model=args.llm)
     print(f"[llm] openai {args.llm} available={llm.available()}")
     if not args.no_camera:
-        camera = CameraProcess(index=args.camera)
-        camera.on_auto_utterance = _on_auto_utterance
-        camera.on_signal = _on_camera_signal
-        threading.Thread(target=_signal_worker, daemon=True).start()
+        camera = _make_camera(args.source or (f"webcam:{args.camera}" if args.camera >= 0 else "webcam"))
         for _ in range(400):  # child imports torch/mediapipe first (~10-20 s)
-            if camera.opened: break
+            if camera.opened or camera.fatal: break
             time.sleep(0.1)
-        print(f"[camera] opened={camera.opened} index={camera.index}")
+        print(f"[camera] opened={camera.opened} source={camera.source_info or camera.source}")
     threading.Thread(target=_keep_warm, daemon=True).start()
     def _prewarm_aligner():
         try:
