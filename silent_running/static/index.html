@@ -53,6 +53,10 @@ main{min-height:0;overflow:auto}
 .big .text.mid{font-size:clamp(30px,3.6vw,50px);line-height:1.15}
 .big .text.long{font-size:clamp(22px,2.4vw,34px);line-height:1.25;font-weight:700}
 .big .text.placeholder{color:#2e3a4a}
+.big .text.live{color:#6f86a0;font-weight:700}
+.big .text.live::after{content:'▍';color:var(--accent2);animation:blink 1s steps(2) infinite}
+@keyframes blink{50%{opacity:0}}
+.dym button.live{opacity:.7;border-style:dashed}
 .big .conf{margin-top:10px;color:var(--muted);font-size:14px;display:flex;gap:10px;align-items:center;flex-wrap:wrap}
 .pill{display:inline-block;padding:3px 9px;border-radius:999px;font:600 11px Inter;letter-spacing:.5px;background:var(--panel2);border:1px solid var(--line)}
 .pill.ok{color:var(--accent);border-color:rgba(57,217,138,.4)}.pill.warn{color:var(--warn);border-color:rgba(255,179,71,.4)}.pill.ctx{color:var(--accent2);border-color:rgba(78,161,255,.4)}.pill.bad{color:var(--bad);border-color:rgba(255,92,108,.5)}
@@ -133,7 +137,7 @@ details summary{cursor:pointer;color:var(--muted);font-size:12px;letter-spacing:
       <div class="badge"><div class="dot" id="dot"></div><span id="track">looking for face…</span></div>
       <div class="badge meter" id="meter" style="top:44px">expr <span>angry <b><i id="m_angry"></i></b></span><span>warm <b><i id="m_warm"></i></b></span><span>sad <b><i id="m_sad"></i></b></span></div>
       <div class="state idle" id="state">idle</div>
-      <div class="hint">Face the camera. Hold <kbd>Listen</kbd> (or <kbd>space</kbd>), mouth the phrase silently, release.</div>
+      <div class="hint">Face the camera. Hold <kbd>Listen</kbd> (or <kbd>space</kbd>) and mouth the phrase. It answers as soon as it is sure, often before you finish.</div>
     </div>
     <button class="listen" id="listen">HOLD TO LISTEN<small>or hold the space bar · hands-free available in Dev</small></button>
     <div class="row">
@@ -167,7 +171,7 @@ details summary{cursor:pointer;color:var(--muted);font-size:12px;letter-spacing:
       <h3>Conversation</h3>
       <div class="log" id="log"><span class="small">Nothing yet. Nurse asks, patient mouths, laptop answers.</span></div>
     </div>
-    <div class="panel"><div class="vitals" id="vitals"></div><div class="err" id="err"></div></div>
+    <div class="panel"><div class="vitals" id="vitals"></div><div class="small" id="bankstat"></div><div class="err" id="err"></div></div>
   </div>
 </section>
 
@@ -216,7 +220,7 @@ details summary{cursor:pointer;color:var(--muted);font-size:12px;letter-spacing:
     </div>
     <div class="panel">
       <h3>Pipeline</h3>
-      <div class="small mono">webcam → MediaPipe face + blendshapes (separate process) → 96×96 mouth crops @25fps → Auto-AVSR conformer (MPS) → CTC greedy + phrase scoring (CTC prefilter 204→48, attention rescore) + beam n-best → context prior / LLM propose+verify → ElevenLabs v3 tag+stability+speed → MMS align → per-word retime → play</div>
+      <div class="small mono">webcam → MediaPipe face + blendshapes (separate process) → per-frame 96×96 mouth crops streamed every 200 ms → Auto-AVSR conformer re-encode (MPS) → CTC scores for all 204 phrases + context prior → commit when ≥80% and the phrase's last token is out (often before the mouth stops) → pre-decoded Web Audio voice bank (~10 ms) · background: attention rescoring (top 16) + beam n-best → ElevenLabs v3 for strong emotion → MMS align → per-word retime</div>
     </div>
   </div>
 </section>
@@ -250,10 +254,13 @@ function setState(s,extra){const el=$('#state');el.className='state '+s;el.textC
 function handle(m){
   if(m.type==='hello'){phrases=m.phrases;phraseTable=m.phrase_table||[];applyCtx(m.context);mode=m.state.mode;syncMode();if(m.state.expressive!=null)$('#expressive').checked=m.state.expressive;
     $('#nphr').textContent=phrases.length+' phrases';$('#phrlist').innerHTML=phrases.map(p=>`<span>${p}</span>`).join('');buildChips();(m.log||[]).forEach(addLog);
-    fetch('/api/state').then(r=>r.json()).then(s=>{$('#engine').textContent=`${s.engine.model} · ${phrases.length} phrases`;});}
+    fetch('/api/state').then(r=>r.json()).then(s=>{$('#engine').textContent=`${s.engine.model} · ${phrases.length} phrases`;});
+    const v=$('#voice').value;if(v&&v.startsWith('clone:'))preloadBank(v.slice(6));}
   else if(m.type==='status'){setState(m.status,m.stage);if(m.status==='processing'&&m.stage==='crop'){$('#err').textContent='';}}
   else if(m.type==='raw'){$('#raw').innerHTML=`<span class="lbl">raw (CTC greedy)</span>${m.text||'<span class="small">(nothing)</span>'}`;$('#nbest').innerHTML='';$('#lat').textContent=`crop ${(m.latency.crop*1000).toFixed(0)} ms · encode ${(m.latency.encode*1000).toFixed(0)} ms · ${m.n_frames} frames (${m.duration.toFixed(1)} s)`;}
+  else if(m.type==='partial'){renderPartial(m);}
   else if(m.type==='result'){last=m;render(m);if($('#autospeak').checked&&!(m.mode==='open'&&$('#llm').checked)&&!m.critical)speak(m.selected);}
+  else if(m.type==='refined'){renderRefined(m);}
   else if(m.type==='alert'){showAlert(m);}
   else if(m.type==='nbest'){renderNbest(m.nbest);}
   else if(m.type==='llm'){renderLLM(m);}
@@ -272,13 +279,30 @@ function buildChips(){const cats=[...new Set(phraseTable.map(r=>r.category))];co
 function addLog(e){const L=$('#log');if(L.querySelector('.small'))L.innerHTML='';const d=document.createElement('div');d.className='msg '+e.who+(e.critical?' critical':'');const t=new Date(e.ts*1000).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
   d.innerHTML=`<span class="who">${e.who}</span><span class="t">${e.text}<span class="meta">${t}${e.confidence?` · ${fmtPct(e.confidence)}`:''}${e.emotion&&e.emotion!=='neutral'?` · ${e.emotion}`:''}</span></span>`;L.appendChild(d);L.scrollTop=L.scrollHeight;}
 function showAlert(m){$('#alerttext').textContent=m.text.toUpperCase();const a=$('#alert');a.classList.add('on');
-  speak(m.text,{emotion:'urgent'});player.onended=()=>{player.onended=null;speak(m.text,{emotion:'urgent'});};
+  const sp=$('#voice').value.startsWith('clone:')?$('#voice').value.slice(6):null;
+  if(sp&&bank.has(sp+'|'+m.text.toLowerCase())){speak(m.text,{emotion:'neutral',intensity:0,onended:()=>speak(m.text,{emotion:'urgent',forceRemote:true})});}
+  else{speak(m.text,{emotion:'urgent'});player.onended=()=>{player.onended=null;speak(m.text,{emotion:'urgent'});};}
   clearTimeout(showAlert.t);showAlert.t=setTimeout(()=>a.classList.remove('on'),15000);}
 $('#alertok').onclick=()=>{$('#alert').classList.remove('on');};
+function renderPartial(m){
+  if(last&&last.utt_id===m.utt_id)return; // already answered
+  const bt=$('#bigtext');const txt=(m.top&&m.top.length&&m.top[0].prob>0.35)?m.top[0].phrase:pretty(m.text);
+  bt.className='text live'+(txt.length>36?' mid':'');bt.textContent=txt||'…';
+  $('#conf').innerHTML=`<span class="pill ctx">live · ${m.t.toFixed(1)} s · ${m.n_frames} frames · scored in ${m.score_ms} ms</span>`+(m.text?`<span class="small mono">sees: ${m.text.toLowerCase()}</span>`:'');
+  $('#raw').innerHTML=`<span class="lbl">live (CTC greedy)</span>${m.text||'<span class="small">(nothing yet)</span>'}`;
+  if(m.top&&m.top.length){const dym=$('#dym');dym.innerHTML='';m.top.forEach((r,i)=>{const b=document.createElement('button');b.className='live'+(i===0?' top':'');b.innerHTML=`<span>${r.phrase}</span><small>${fmtPct(r.prob)}</small>`;b.onclick=()=>{speak(r.phrase);send({cmd:'confirm',text:r.phrase});$('#bigtext').textContent=r.phrase.toUpperCase();};dym.appendChild(b);});}
+}
+function renderRefined(m){
+  if(!last||last.utt_id!==m.utt_id||m.error)return;
+  if(m.changed){$('#conf').insertAdjacentHTML('beforeend',`<span class="pill warn">full rescoring prefers “${m.selected}” (${fmtPct(m.confidence)}) · tap it to say it</span>`);
+    const dym=$('#dym');const b=document.createElement('button');b.innerHTML=`<span>${m.selected}</span><small>rescored ${fmtPct(m.confidence)}</small>`;b.onclick=()=>{speak(m.selected);send({cmd:'confirm',text:m.selected});$('#bigtext').textContent=m.selected.toUpperCase();};dym.prepend(b);}
+  else $('#conf').insertAdjacentHTML('beforeend',`<span class="pill ok">full rescoring agrees</span>`);
+}
 function render(m){
   const bt=$('#bigtext');bt.className='text'+(m.selected.length>90?' long':(m.selected.length>36?' mid':''));bt.textContent=m.selected.toUpperCase();
   const conf=$('#conf');let pills='';const c=m.confidence;
   pills+=`<span class="pill ${c>0.7?'ok':'warn'}">confidence ${fmtPct(c)}</span>`;
+  if(m.early)pills+=`<span class="pill ok">⚡ answered while mouthing · ${m.early.at.toFixed(1)} s in</span>`;
   if(m.critical)pills+=`<span class="pill bad">CRITICAL</span>`;
   if(m.mode==='phrase'){
     if(m.in_inventory===false)pills+=`<span class="pill warn">weak match: free transcript fits ${m.phrase_gap.toFixed(1)} nats better</span>`;
@@ -342,6 +366,24 @@ function pretty(s){s=(s||'').toLowerCase().replace(/\bi\b/g,'I').replace(/\bi'/g
 function loadVoices(){voices.list=speechSynthesis.getVoices().filter(v=>v.lang.startsWith('en'));}
 speechSynthesis.onvoiceschanged=()=>{loadVoices();loadCloned();};loadVoices();setTimeout(loadCloned,500);
 let cloned=[];const player=new Audio();
+// ---------- instant playback: every phrase pre-decoded into a Web Audio buffer for the selected voice
+const actx=new (window.AudioContext||window.webkitAudioContext)({latencyHint:'interactive'});
+const bank=new Map();let bankVoice=null,bankLoading=null;
+function unlockAudio(){if(actx.state!=='running')actx.resume().catch(()=>{});}
+window.addEventListener('pointerdown',unlockAudio,{capture:true});window.addEventListener('keydown',unlockAudio,{capture:true});
+async function preloadBank(sp){
+  // pass 1: everything the server already has cached (fast, free); pass 2: synthesize the misses slowly in the background
+  if(!sp||bankVoice===sp)return;bankVoice=sp;bank.clear();
+  let done=0,fail=0;const t0=performance.now();const misses=[];
+  const stat=(phase)=>{$('#bankstat').textContent=`voice bank · ${bank.size}/${phrases.length} instant${phase?` · ${phase}`:''}`;};
+  const load=async(ph,cachedOnly)=>{try{const r=await fetch(`/api/tts?text=${encodeURIComponent(ph)}&voice=${encodeURIComponent(sp)}${cachedOnly?'&cached_only=1':''}`);
+      if(r.status===404&&cachedOnly){misses.push(ph);return;}if(!r.ok)throw 0;const buf=await actx.decodeAudioData(await r.arrayBuffer());bank.set(sp+'|'+ph.toLowerCase(),buf);}catch(e){fail++;}};
+  const run=async(list,n,cachedOnly)=>{const todo=list.slice();const w=async()=>{while(todo.length&&bankVoice===sp){await load(todo.shift(),cachedOnly);done++;if(done%10===0)stat(cachedOnly?'loading':'synthesizing misses');}};await Promise.all(Array.from({length:n},w));};
+  await run(phrases,8,true);stat(misses.length?`${misses.length} to synthesize`:`ready in ${((performance.now()-t0)/1000).toFixed(1)} s`);
+  if(misses.length){await run(misses,2,false);if(bankVoice===sp)stat(`ready${fail?` (${fail} failed)`:''}`);}
+}
+let curSrc=null;
+function playBuffer(buf){unlockAudio();if(curSrc){try{curSrc.stop()}catch(e){}}player.pause();const src=actx.createBufferSource();src.buffer=buf;src.connect(actx.destination);src.start();curSrc=src;return src;}
 function speakBrowser(text){speechSynthesis.cancel();const u=new SpeechSynthesisUtterance(text);const v=voices.list.find(v=>v.name==='Samantha')||voices.list[0];if(v)u.voice=v;speechSynthesis.speak(u);$('#err').textContent='ElevenLabs unavailable, used browser voice';}
 function speak(text,opts){if(!text)return;const sel=$('#voice').value;opts=opts||{};
   if(sel.startsWith('clone:')){const sp=sel.slice(6);player.pause();
@@ -349,12 +391,18 @@ function speak(text,opts){if(!text)return;const sel=$('#voice').value;opts=opts|
     let emo=opts.emotion||ex.emotion||'neutral',inten=opts.intensity!=null?opts.intensity:(ex.intensity||0),rate=tm.rate||1;
     if(emo==='urgent'){emo='angry';inten=0.7;rate=1.1;}
     const expressive=$('#expressive').checked;
+    // instant path: pre-decoded neutral buffer (the server would pick neutral Flash for these anyway, or the emotion is mild)
+    const buf=bank.get(sp+'|'+text.toLowerCase());
+    if(buf&&!opts.forceRemote&&(!expressive||emo==='neutral'||inten<0.5)){const t=performance.now();const src=playBuffer(buf);
+      if(opts.onended)src.onended=opts.onended;
+      const d=$('#delivrep');if(d)d.textContent=`played from voice bank in ${(performance.now()-t).toFixed(0)} ms (pre-synthesized, neutral)`;
+      if(!$('#conf').querySelector('.voicepill'))$('#conf').insertAdjacentHTML('beforeend',`<span class="pill ctx voicepill">voice: ${sp} · instant</span>`);return;}
     const url=expressive?`/api/say?text=${encodeURIComponent(text)}&emotion=${emo}&intensity=${inten}&rate=${rate}&voice=${encodeURIComponent(sp)}&utt_id=${last?last.utt_id:0}&_=${Date.now()}`:`/api/tts?text=${encodeURIComponent(text)}&voice=${encodeURIComponent(sp)}&_=${Date.now()}`;
     player.src=url;player.onerror=()=>{speakBrowser(text);};player.play().catch(e=>{if(e&&e.name==='NotAllowedError'){$('#err').textContent='Click anywhere on the page once to enable audio, then try again.';}else speakBrowser(text);});
     if(!$('#conf').querySelector('.voicepill'))$('#conf').insertAdjacentHTML('beforeend',`<span class="pill ctx voicepill">voice: ${sp}</span>`);}
   else speakBrowser(text);}
-function loadCloned(){fetch('/api/voices').then(r=>r.json()).then(j=>{cloned=j.voices||[];const sel=$('#voice');const add=(val,label)=>{if(![...sel.options].some(o=>o.value===val)){const o=document.createElement('option');o.value=val;o.textContent=label;sel.insertBefore(o,sel.firstChild);}};(j.stock||[]).slice().reverse().forEach(v=>add('clone:'+v.name,`☁ ${v.name} (ElevenLabs)`));cloned.forEach(v=>add('clone:'+v.speaker,`🎙 ${v.speaker} (my voice)`));if(j.selected&&j.available){sel.value='clone:'+j.selected;}});}
-$('#voice').addEventListener('change',e=>{const v=e.target.value;send({cmd:'settings',voice:v.startsWith('clone:')?v.slice(6):null});});
+function loadCloned(){fetch('/api/voices').then(r=>r.json()).then(j=>{cloned=j.voices||[];const sel=$('#voice');const add=(val,label)=>{if(![...sel.options].some(o=>o.value===val)){const o=document.createElement('option');o.value=val;o.textContent=label;sel.insertBefore(o,sel.firstChild);}};(j.stock||[]).slice().reverse().forEach(v=>add('clone:'+v.name,`☁ ${v.name} (ElevenLabs)`));cloned.forEach(v=>add('clone:'+v.speaker,`🎙 ${v.speaker} (my voice)`));if(j.selected&&j.available){sel.value='clone:'+j.selected;}const v=sel.value;if(v&&v.startsWith('clone:')&&phrases.length)preloadBank(v.slice(6));});}
+$('#voice').addEventListener('change',e=>{const v=e.target.value;send({cmd:'settings',voice:v.startsWith('clone:')?v.slice(6):null});if(v.startsWith('clone:'))preloadBank(v.slice(6));});
 // ---------- listen button
 const lb=$('#listen');let held=false;
 function down(e){if(held)return;held=true;lb.classList.add('on');send({cmd:'start'});e&&e.preventDefault&&e.preventDefault();}

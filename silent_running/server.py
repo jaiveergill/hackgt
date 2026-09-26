@@ -63,29 +63,35 @@ def speak_backend(text):
 
 
 # ----------------------------------------------------------------------------- decoding pipeline
-def run_decode(rois, n_face, n_total, duration, source="webcam", label=None, t_crop=0.0, expression=None):
-    """Full pipeline on an utterance's mouth crops. Emits incremental events so the UI can show progress."""
-    with work_lock:
+def run_decode(rois, n_face, n_total, duration, source="webcam", label=None, t_crop=0.0, expression=None, enc=None, logp=None, fast_vsr=None, early=None, have_lock=False):
+    """Full pipeline on an utterance's mouth crops. Emits incremental events so the UI can show progress.
+    enc/logp: reuse an encode from the streaming path. fast_vsr: CTC-only phrase rows (streaming early commit);
+    the attention rescoring then runs in the background and is broadcast as a "refined" event."""
+    with (work_lock if not have_lock else _NullCtx()):
         STATE["utt_id"] += 1
         uid = STATE["utt_id"]
         t0 = time.time() - t_crop
         set_status("processing", utt_id=uid, stage="encode")
-        try:
-            x = engine.to_model_input(rois)
-        except Exception as e:
-            set_status("idle")
-            broadcast({"type": "error", "utt_id": uid, "message": f"Mouth crop failed: {e}"})
-            return None
-        t1 = time.time()
-        set_status("processing", utt_id=uid, stage="encode")
-        enc = engine.encode(x)
+        if enc is None:
+            try:
+                x = engine.to_model_input(rois)
+            except Exception as e:
+                set_status("idle")
+                broadcast({"type": "error", "utt_id": uid, "message": f"Mouth crop failed: {e}"})
+                return None
+            t1 = time.time()
+            enc = engine.encode(x)
+        else:
+            t1 = time.time()
+            x = None
         t2 = time.time()
-        greedy = engine.ctc_greedy(enc)
+        greedy = engine.ctc_greedy(enc, logp)
         t3 = time.time()
-        broadcast({"type": "raw", "utt_id": uid, "stage": "greedy", "text": greedy, "n_frames": int(x.shape[1]), "duration": duration,
+        n_frames = int(x.shape[1]) if x is not None else int(len(rois))
+        broadcast({"type": "raw", "utt_id": uid, "stage": "greedy", "text": greedy, "n_frames": n_frames, "duration": duration,
                    "latency": {"crop": t1 - t0, "encode": t2 - t1, "greedy": t3 - t2}})
-        result = {"utt_id": uid, "mode": STATE["mode"], "raw_greedy": greedy, "n_frames": int(x.shape[1]), "duration": duration, "source": source, "label": label,
-                  "expression": expression or {"emotion": "neutral", "intensity": 0.0}}
+        result = {"utt_id": uid, "mode": STATE["mode"], "raw_greedy": greedy, "n_frames": n_frames, "duration": duration, "source": source, "label": label,
+                  "expression": expression or {"emotion": "neutral", "intensity": 0.0}, "early": early}
         LAST["enc"] = enc; LAST["utt_id"] = uid
         if not greedy.strip():
             # CTC saw no speech-like mouth movement at all. The attention decoder would hallucinate fluent text here.
@@ -94,9 +100,13 @@ def run_decode(rois, n_face, n_total, duration, source="webcam", label=None, t_c
             result.update({"selected": None, "no_speech": True})
             return result
         if STATE["mode"] == "phrase":
-            pd = phrase_decoder.decode(enc)
+            pd = phrase_decoder.decode(enc, vsr=fast_vsr)
             # how well does the best inventory phrase explain the video compared with the model's own free transcript?
-            greedy_score = engine.score_phrases(enc, [greedy])[0]["score"] if greedy.strip() else None
+            t3b = time.time()
+            if fast_vsr is not None:
+                greedy_score = engine.ctc_scores(enc, [greedy], logp)[0] if greedy.strip() else None
+            else:
+                greedy_score = engine.score_phrases(enc, [greedy])[0]["score"] if greedy.strip() else None
             best_vsr = max(r["vsr_score"] for r in pd["ranking"])
             gap = (greedy_score - best_vsr) if greedy_score is not None else 0.0
             t4 = time.time()
@@ -106,8 +116,10 @@ def run_decode(rois, n_face, n_total, duration, source="webcam", label=None, t_c
                            "in_inventory": gap < PHRASE_GAP_THRESHOLD,
                            "context": context.snapshot(), "latency_total": t4 - t0})
             result["timing"] = _safe_timing(enc, pd["selected"]); LAST["timing"] = result["timing"]
+            t5 = time.time()
             set_status("idle")
-            broadcast({"type": "result", **result, "latency": {"crop": t1 - t0, "encode": t2 - t1, "phrase": t4 - t3, "total": t4 - t0}})
+            broadcast({"type": "result", **result, "latency": {"crop": t1 - t0, "encode": t2 - t1, "phrase": t4 - t3, "total": t5 - t0,
+                                                               "score": pd.get("t_score", 0.0), "greedy_score": t4 - t3b, "align": t5 - t4}})
             sel = pd["selected"]
             result["category"] = CATEGORY_OF.get(sel.lower())
             result["critical"] = sel.lower() in CRITICAL and pd["confidence"] >= CRITICAL_CONF
@@ -120,6 +132,8 @@ def run_decode(rois, n_face, n_total, duration, source="webcam", label=None, t_c
                 speak_backend(pd["selected"])
             # background: full beam n-best so the UI can show what the open-vocab decoder thought
             threading.Thread(target=_bg_nbest, args=(enc, uid), daemon=True).start()
+            if fast_vsr is not None:
+                threading.Thread(target=_bg_refine, args=(enc, uid, pd["selected"]), daemon=True).start()
         else:
             set_status("processing", utt_id=uid, stage="beam")
             nbest = engine.beam_search(enc, 5)
@@ -138,6 +152,104 @@ def run_decode(rois, n_face, n_total, duration, source="webcam", label=None, t_c
             if STATE["llm_enabled"] and llm is not None:
                 threading.Thread(target=_bg_llm, args=(nbest, uid, enc), daemon=True).start()
         return result
+
+
+class _NullCtx:
+    def __enter__(self): return self
+    def __exit__(self, *a): return False
+
+
+def _bg_refine(enc, uid, early_sel):
+    """After an early (CTC-only) commit: attention-rescore the top phrases and tell the UI if the answer changed."""
+    try:
+        with work_lock:
+            pd = phrase_decoder.decode(enc)
+        broadcast({"type": "refined", "utt_id": uid, "selected": pd["selected"], "confidence": pd["confidence"], "changed": pd["selected"] != early_sel,
+                   "ranking": pd["ranking"][:6]})
+    except Exception as e:
+        broadcast({"type": "refined", "utt_id": uid, "error": str(e)})
+
+
+# ----------------------------------------------------------------------------- streaming (decide while the mouth is still moving)
+COMMIT_PROB = 0.80      # CTC-only posterior of the top phrase (with context prior)
+COMMIT_MIN_FRAMES = 15  # 0.6 s of video before any commit
+COMMIT_TRAIL_BLANK = 3  # encoder frames (40 ms each) of blank after the phrase's last token
+STREAM = {"chunks": [], "n": 0, "active": False, "committed": False, "t0": 0.0, "tag": None, "serial": None, "last_scored": 0, "prev_top": None, "stable": 0}
+stream_lock = threading.Lock()
+stream_event = threading.Event()
+
+
+def _on_partial(chunk, n_total, tag, secs, serial):
+    with stream_lock:
+        if not STREAM["active"] or STREAM["serial"] != serial:
+            STREAM.update(chunks=[], n=0, active=True, committed=False, t0=time.time() - secs, tag=tag, serial=serial, last_scored=0, prev_top=None, stable=0)
+        STREAM["chunks"].append(chunk); STREAM["n"] += len(chunk)
+    stream_event.set()
+
+
+def _stream_reset():
+    with stream_lock:
+        STREAM.update(chunks=[], n=0, active=False, committed=False, tag=None, serial=None, last_scored=0, prev_top=None, stable=0)
+
+
+def _stream_worker():
+    while True:
+        stream_event.wait(); stream_event.clear()
+        with stream_lock:
+            if not STREAM["active"] or STREAM["committed"]:
+                continue
+            n = STREAM["n"]
+            if n < 10 or n - STREAM["last_scored"] < 4:
+                continue
+            rois = np.concatenate(STREAM["chunks"], axis=0)
+            STREAM["last_scored"] = n
+            tag, t0 = STREAM["tag"], STREAM["t0"]
+        if not work_lock.acquire(blocking=False):
+            stream_event.set(); time.sleep(0.03); continue
+        try:
+            _score_partial(rois, tag, t0)
+        except Exception as e:
+            print("[stream]", e)
+        finally:
+            work_lock.release()
+
+
+def _score_partial(rois, tag, t0):
+    ts = time.time()
+    x = engine.to_model_input(rois)
+    enc = engine.encode(x)
+    logp = engine.ctc_logp(enc)
+    ids, collapsed, trailing_blank = engine.greedy_path(logp)
+    greedy = engine._ids_to_text(collapsed)
+    uid = STATE["utt_id"] + 1
+    top = []
+    commit = None
+    if STATE["mode"] == "phrase":
+        ctc = engine.ctc_scores(enc, phrases, logp)
+        rows = [{"phrase": p, "att": None, "ctc": c, "score": c, "n_tok": 0} for p, c in zip(phrases, ctc)]
+        pd = phrase_decoder.decode(enc, vsr=rows)
+        top = [{"phrase": r["phrase"], "prob": r["final_prob"]} for r in pd["ranking"][:5]]
+        sel = pd["selected"]
+        with stream_lock:
+            STREAM["stable"] = STREAM["stable"] + 1 if STREAM["prev_top"] == sel else 0
+            STREAM["prev_top"] = sel
+            stable = STREAM["stable"]
+        last_tok = engine.tokenize(sel)[-1] if sel else None
+        phrase_done = bool(collapsed) and last_tok is not None and collapsed[-1] == last_tok and trailing_blank >= COMMIT_TRAIL_BLANK
+        if (pd["confidence"] >= COMMIT_PROB and stable >= 1 and len(rois) >= COMMIT_MIN_FRAMES and phrase_done and greedy.strip()):
+            commit = (rows, pd)
+    broadcast({"type": "partial", "utt_id": uid, "text": greedy, "top": top, "n_frames": int(len(rois)), "t": round(time.time() - t0, 2),
+               "score_ms": int((time.time() - ts) * 1000), "tag": tag})
+    if commit is not None:
+        with stream_lock:
+            if STREAM["committed"]:
+                return
+            STREAM["committed"] = True
+        early = {"at": round(time.time() - t0, 2), "n_frames": int(len(rois)), "tag": tag}
+        if camera:
+            camera.finish()
+        run_decode(rois, int(len(rois)), int(len(rois)), len(rois) / 25.0, source=f"webcam-{tag}-stream", t_crop=0.0, expression=None,
+                   enc=enc, logp=logp, fast_vsr=commit[0], early=early, have_lock=True)
 
 
 def _bg_nbest(enc, uid):
@@ -275,13 +387,18 @@ def stream():
 
 
 @app.get("/api/tts")
-def api_tts(text: str, voice: str = None):
-    """Cloned-voice speech (Plan 3). Returns MP3; 503 if no ElevenLabs key or voice so the UI falls back to the browser voice."""
+def api_tts(text: str, voice: str = None, cached_only: int = 0):
+    """Cloned-voice speech (Plan 3). Returns MP3; 503 if no ElevenLabs key or voice so the UI falls back to the browser voice.
+    cached_only=1: 404 instead of synthesizing (the UI's voice-bank preload uses this first, then fills misses slowly)."""
     from fastapi.responses import Response
     speaker = voice or STATE.get("voice")
     vid = eltts.voice_for(speaker) if speaker else None
     if not vid or not eltts.available():
         return JSONResponse({"error": "no cloned voice available"}, status_code=503)
+    if cached_only:
+        p = eltts._cache_path(vid, text)
+        if not os.path.exists(p):
+            return JSONResponse({"error": "not cached"}, status_code=404)
     try:
         audio, cached, secs = eltts.synth(text, vid)
     except Exception as e:
@@ -310,8 +427,12 @@ def api_say(text: str, emotion: str = "neutral", intensity: float = 0.0, rate: f
     plan = eltts.plan_delivery(text, emotion, intensity, rate)
     report = {"emotion": emotion, "intensity": intensity, "rate": rate, "tag": plan["tag"], "model": plan["model"], "stability": plan["settings"]["stability"],
               "cached": cached, "t_synth": round(time.time() - t0, 2), "retime": {"applied": False}}
-    wav, sr = prosody.mp3_to_wav(mp3)
     timing = LAST.get("timing") if utt_id and utt_id == LAST.get("utt_id") else None
+    if not (retime and timing and timing.get("words")):
+        report["total"] = round(time.time() - t0, 2)
+        broadcast({"type": "delivery", "utt_id": utt_id, **report})
+        return Response(content=mp3, media_type="audio/mpeg", headers={"X-Delivery": json.dumps({k: v for k, v in report.items() if k != "retime"})})
+    wav, sr = prosody.mp3_to_wav(mp3)
     if retime and timing and timing.get("words"):
         t1 = time.time()
         try:
@@ -406,6 +527,46 @@ def api_decode_file(path: str, label: str = None):
     return res or {"error": "decode failed"}
 
 
+@app.post("/api/stream_file")
+def api_stream_file(path: str, chunk_frames: int = 5, realtime: int = 1):
+    """Dev: replay a video's mouth crops through the streaming path (partials every `chunk_frames`), as the camera would.
+    Blocks until the utterance is committed early or the file ends (then runs the normal final decode)."""
+    p = path if os.path.isabs(path) else os.path.join(ROOT, path)
+    if not os.path.exists(p):
+        return JSONResponse({"error": "not found"}, status_code=404)
+    frames = _read_video(p)[0].numpy()
+    lms = engine.landmarks_for_frames(frames)
+    rois = engine.mouth_rois(frames, lms)
+    if rois is None:
+        return JSONResponse({"error": "no face"}, status_code=400)
+    _stream_reset()
+    serial = f"file-{time.time()}"
+    t0 = time.time()
+    partials = []
+    for i in range(0, len(rois), chunk_frames):
+        chunk = rois[i:i + chunk_frames]
+        _on_partial(chunk, i + len(chunk), "file", (i + len(chunk)) / 25.0, serial)
+        if realtime:
+            time.sleep(chunk_frames / 25.0)
+        with stream_lock:
+            if STREAM["committed"]:
+                break
+    # wait for the worker to drain, then decide
+    for _ in range(100):
+        with stream_lock:
+            committed = STREAM["committed"]
+        if committed or not work_lock.locked():
+            break
+        time.sleep(0.02)
+    with stream_lock:
+        committed = STREAM["committed"]
+    if committed:
+        return {"committed_early": True, "elapsed": round(time.time() - t0, 2), "utt_id": STATE["utt_id"], "n_frames_total": int(len(rois))}
+    res = run_decode(rois, len(rois), len(rois), len(rois) / 25.0, source=os.path.relpath(p, ROOT))
+    _stream_reset()
+    return {"committed_early": False, "elapsed": round(time.time() - t0, 2), "selected": (res or {}).get("selected"), "confidence": (res or {}).get("confidence")}
+
+
 # ----------------------------------------------------------------------------- WebSocket
 @app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket):
@@ -418,6 +579,7 @@ async def ws_endpoint(ws: WebSocket):
             cmd = msg.get("cmd")
             if cmd == "start":
                 try:
+                    _stream_reset()
                     camera.start_listening()
                     set_status("listening")
                 except Exception as e:
@@ -471,8 +633,11 @@ def _on_auto_utterance(u):
 
 
 def _decode_utterance(u, source="webcam"):
+    _stream_reset()
     if u["rois"] is None:
         set_status("idle")
+        if u["error"] == "committed":   # the streaming path already answered this utterance
+            return
         msgs = {"too short": "Utterance too short. Hold Listen while you mouth the phrase.", "face not tracked": f"Face not tracked well enough ({u['n_face']}/{u['n_total']} frames). Face the camera and try again."}
         broadcast({"type": "error", "message": msgs.get(u["error"], u["error"] or "capture failed")})
         return
@@ -550,6 +715,8 @@ def main():
     if not args.no_camera:
         camera = CameraProcess(index=args.camera)
         camera.on_auto_utterance = _on_auto_utterance
+        camera.on_partial = _on_partial
+        threading.Thread(target=_stream_worker, daemon=True).start()
         for _ in range(400):  # child imports torch/mediapipe first (~10-20 s)
             if camera.opened: break
             time.sleep(0.1)

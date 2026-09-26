@@ -26,6 +26,18 @@ python -m silent_running.server            # http://127.0.0.1:8000
 Open Mode's LLM uses the OpenAI API (`gpt-4o-mini`); put `OPENAI_API_KEY=...` in `.env`. It never runs on the primary Phrase Mode path.
 Voice output: browser voices by default; with `ELEVEN_LABS_API_KEY` in `.env` the UI lists ElevenLabs stock voices (`--voice Bella`), and cloned voices once the account tier allows Instant Voice Cloning (see `plans/PLAN_3_VOICE_CLONING.md`).
 
+## Latency: it answers while you are still mouthing
+
+The live path no longer waits for the utterance to end. The camera process crops each frame as it arrives (pixel-identical
+to the offline crop, ~1 ms/frame, 6-frame lag) and streams the crops to the server every 200 ms. The server re-encodes the
+growing utterance on the GPU, scores all 204 phrases with the CTC head (~40 ms per pass), and **commits as soon as the top
+phrase is at or above 80% posterior, has been the top phrase twice in a row, and its last token has been emitted followed by
+120 ms of blank** (i.e. the phrase is finished on the lips). On commit the phrase is spoken from a bank of pre-decoded
+Web Audio buffers (~10 ms to first sound) and the full attention rescoring runs in the background, flagging in the UI if it
+disagrees. Partial CTC text and the live top-5 are shown as they change. If nothing commits before release, the normal path
+runs: encode ~60 ms + phrase scoring ~40 ms (batched attention decoder on the GPU, CTC prefilter 204 -> 16) + alignment ~10 ms.
+`plans/PLAN_5_LATENCY.md` has the measurements. `POST /api/stream_file?path=...` replays a clip through the streaming path.
+
 ## Using the UI
 
 * **Phrase Mode** (primary demo): hold **HOLD TO LISTEN** (or the space bar), silently mouth one of the phrases

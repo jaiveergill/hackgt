@@ -16,9 +16,13 @@ class PhraseDecoder:
         self.engine, self.phrases, self.context = engine, phrases, context
         self.gamma, self.temp = gamma, temp
 
-    def decode(self, enc):
+    def decode(self, enc, vsr=None):
+        """vsr: optional precomputed rows [{phrase, att, ctc, score, n_tok}] (e.g. CTC-only scores from the streaming path)."""
         t0 = time.time()
-        vsr = self.engine.score_phrases(enc, self.phrases)  # sorted by VSR score
+        if vsr is None:
+            vsr = self.engine.score_phrases(enc, self.phrases)  # sorted by VSR score
+        else:
+            vsr = sorted(vsr, key=lambda r: -r["score"])
         t1 = time.time()
         prior = {p["phrase"]: p for p in self.context.log_prior(self.phrases)}
         vsr_probs = softmax([r["score"] for r in vsr], self.temp)

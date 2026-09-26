@@ -26,6 +26,87 @@ def resample_25fps(items):
     return frames, lms, float(duration)
 
 
+class IncrementalCropper:
+    """Streams the exact crops VideoProcess.crop_patch would produce, but frame by frame as they arrive.
+
+    Frames are resampled to 25 fps against the utterance start time; the landmark smoother needs +-6 frames so
+    each crop is produced 6 frames (~240 ms) after its frame; finish() crops the tail with the same truncated
+    window the offline path uses. Missing landmarks hold the last valid ones (offline interpolates linearly)."""
+    def __init__(self, vp, t_start):
+        self.vp, self.t_start = vp, t_start
+        self.items = []         # raw (ts, rgb, lm) since t_start
+        self.frames, self.lms = [], []   # 25 fps resampled
+        self.rois = []          # crops for frames[0:len(rois)]
+        self.k = 0              # next 25 fps slot to fill
+        self.last_lm = None
+        self.pending_none = 0   # leading frames without landmarks, backfilled on first detection
+
+    def feed(self, ts, rgb, lm):
+        self.items.append((ts, rgb, lm))
+        # fill 25 fps slots whose nearest frame is now decided (a frame at/after the target has arrived)
+        while True:
+            target = self.t_start + self.k / MODEL_FPS
+            if self.items[-1][0] < target:
+                break
+            # nearest of the last frame before target and the first at/after
+            j = len(self.items) - 1
+            while j > 0 and self.items[j - 1][0] >= target:
+                j -= 1
+            cand = [j] + ([j - 1] if j > 0 else [])
+            i = min(cand, key=lambda q: abs(self.items[q][0] - target))
+            _, f, l = self.items[i]
+            self._push(f, l)
+            self.k += 1
+        self._crop_ready(final=False)
+
+    def _push(self, f, l):
+        if l is None:
+            if self.last_lm is None:
+                self.pending_none += 1; l = None
+            else:
+                l = self.last_lm
+        else:
+            l = np.asarray(l, dtype=np.float64)
+            if self.pending_none:
+                for q in range(len(self.lms)):
+                    if self.lms[q] is None: self.lms[q] = l
+                self.pending_none = 0
+            self.last_lm = l
+        self.frames.append(f); self.lms.append(l)
+
+    def _crop_one(self, i, n):
+        w = min(self.vp.window_margin // 2, i, n - 1 - i)
+        sm = np.mean([self.lms[x] for x in range(i - w, i + w + 1)], axis=0)
+        sm += self.lms[i].mean(axis=0) - sm.mean(axis=0)
+        tf, tl = self.vp.affine_transform(self.frames[i], sm, self.vp.reference, grayscale=self.vp.convert_gray)
+        from pipelines.detectors.mediapipe.video_process import cut_patch
+        try:
+            return cut_patch(tf, tl[self.vp.start_idx:self.vp.stop_idx], self.vp.crop_height // 2, self.vp.crop_width // 2)
+        except Exception:
+            return self.rois[-1] if self.rois else np.zeros((self.vp.crop_height, self.vp.crop_width), dtype=np.uint8)
+
+    def _crop_ready(self, final):
+        n = len(self.frames)
+        if self.pending_none:   # no landmarks yet at all
+            return
+        half = self.vp.window_margin // 2
+        while len(self.rois) < n and (final or len(self.rois) + half < n):
+            i = len(self.rois)
+            self.rois.append(self._crop_one(i, n))
+
+    def n_face(self):
+        return sum(1 for _, _, l in self.items if l is not None)
+
+    def finish(self):
+        self._crop_ready(final=True)
+        dur = (self.items[-1][0] - self.items[0][0]) if len(self.items) > 1 else 0.0
+        return (np.stack(self.rois) if self.rois else None), dur
+
+    def take_new(self, since):
+        """Crops completed since index `since` (for streaming partials)."""
+        return np.stack(self.rois[since:]) if len(self.rois) > since else None
+
+
 def _open(idx, width, height):
     import cv2
     cap = cv2.VideoCapture(idx)
@@ -124,23 +205,33 @@ def _worker(conn, index, width, height, preview_width, buffer_seconds):
     quiet_since = None      # time motion dropped below the offset threshold while active
     auto_start = None       # utterance start time (with pre-roll)
     AUTO_ON, AUTO_OFF = 2.6, 1.6      # multiples of the noise floor
-    MIN_ACTIVE, HANG, MIN_UTT, MAX_UTT, PRE_ROLL, POST_ROLL = 0.20, 0.60, 0.5, 6.0, 0.30, 0.15
+    MIN_ACTIVE, HANG, MIN_UTT, MAX_UTT, PRE_ROLL, POST_ROLL = 0.20, 0.35, 0.5, 6.0, 0.30, 0.10
+    PARTIAL_EVERY = 0.20
+    cropper = None; sent_rois = 0; last_partial = 0.0; just_committed = False; utt_serial = 0
+
+    def begin(start):
+        nonlocal cropper, sent_rois, last_partial, utt_serial
+        cropper = IncrementalCropper(vp, start); sent_rois = 0; last_partial = time.time(); utt_serial += 1
+        for it in buffer:
+            if it[0] >= start: cropper.feed(*it)
 
     def emit(start, end, tag):
+        nonlocal cropper, sent_rois
         expression = expr.finish()
-        items = [it for it in buffer if it[0] >= start and it[0] <= end]
-        if len(items) < 8:
-            conn.send(("utterance", None, 0, len(items), 0.0, "too short", 0.0, tag)); return
-        frames, lms, dur = resample_25fps(items)
-        n_face = sum(l is not None for l in lms)
-        if n_face < max(4, len(lms) // 4):
-            conn.send(("utterance", None, n_face, len(lms), dur, "face not tracked", 0.0, tag)); return
+        c, cropper = cropper, None
+        if c is None or len(c.items) < 8:
+            conn.send(("utterance", None, 0, len(c.items) if c else 0, 0.0, "too short", 0.0, tag)); return
+        n_face, n_total = c.n_face(), len(c.lms)
+        if n_face < max(4, n_total // 4):
+            conn.send(("utterance", None, n_face, n_total, 0.0, "face not tracked", 0.0, tag)); return
         try:
             t0 = time.time()
-            rois = vp(frames, list(lms))
-            conn.send(("utterance", rois, n_face, len(lms), dur, None, time.time() - t0, tag, expression))
+            rois, dur = c.finish()
+            if rois is None:
+                conn.send(("utterance", None, n_face, n_total, dur, "face not tracked", 0.0, tag)); return
+            conn.send(("utterance", rois, n_face, n_total, dur, None, time.time() - t0, tag, expression))
         except Exception as e:
-            conn.send(("utterance", None, n_face, len(lms), dur, f"crop failed: {e}", 0.0, tag))
+            conn.send(("utterance", None, n_face, n_total, 0.0, f"crop failed: {e}", 0.0, tag))
 
     while True:
       try:
@@ -148,12 +239,17 @@ def _worker(conn, index, width, height, preview_width, buffer_seconds):
         while conn.poll():
             cmd = conn.recv()
             if cmd[0] == "start":
-                listen_start = time.time(); expr.start()
+                listen_start = time.time(); expr.start(); just_committed = False; begin(listen_start)
             elif cmd[0] == "stop":
                 start, listen_start = listen_start, None
                 if start is None:
-                    conn.send(("utterance", None, 0, 0, 0.0, "too short", 0.0, "manual")); continue
+                    conn.send(("utterance", None, 0, 0, 0.0, "committed" if just_committed else "too short", 0.0, "manual")); just_committed = False; continue
                 emit(start, time.time(), "manual")
+            elif cmd[0] == "finish":   # parent committed early on the streamed crops: end the utterance now
+                tag = "manual" if listen_start is not None else "auto"
+                listen_start = None; auto_start = active_since = quiet_since = None; cropper = None; expr.finish()
+                just_committed = True
+                conn.send(("finished", tag))
             elif cmd[0] == "auto":
                 auto = bool(cmd[1]); active_since = quiet_since = auto_start = None
             elif cmd[0] == "snapshot":
@@ -179,6 +275,16 @@ def _worker(conn, index, width, height, preview_width, buffer_seconds):
             print("[camera] detect failed:", e); lm, bs = None, None
         buffer.append((ts, rgb, lm))
         expr.update(bs, listen_start is not None or auto_start is not None)
+        if cropper is not None:
+            try:
+                cropper.feed(ts, rgb, lm)
+                if ts - last_partial >= PARTIAL_EVERY:
+                    chunk = cropper.take_new(sent_rois)
+                    if chunk is not None:
+                        sent_rois += len(chunk); last_partial = ts
+                        conn.send(("partial", chunk, sent_rois, "manual" if listen_start is not None else "auto", ts - cropper.t_start, utt_serial))
+            except Exception as e:
+                print("[camera] crop error:", e)
         # ---- mouth-motion energy (translation-compensated: patch is re-centred on the mouth every frame)
         patch = None
         if lm is not None:
@@ -204,7 +310,7 @@ def _worker(conn, index, width, height, preview_width, buffer_seconds):
                 if energy > on_thr:
                     active_since = active_since or ts
                     if ts - active_since >= MIN_ACTIVE:
-                        auto_start = active_since - PRE_ROLL; quiet_since = None; expr.start()
+                        auto_start = active_since - PRE_ROLL; quiet_since = None; expr.start(); begin(auto_start)
                 else:
                     active_since = None
             else:
@@ -217,6 +323,8 @@ def _worker(conn, index, width, height, preview_width, buffer_seconds):
                     end = (quiet_since or ts) + POST_ROLL
                     if end - auto_start - PRE_ROLL >= MIN_UTT:
                         emit(auto_start, min(end, ts), "auto")
+                    else:
+                        cropper = None
                     auto_start = active_since = quiet_since = None
         fps_n += 1
         if ts - fps_t >= 1.0:
@@ -274,6 +382,7 @@ class CameraProcess:
         self.responses = queue.Queue()
         self.listening = False
         self.on_auto_utterance = None
+        self.on_partial = None   # (chunk (n,96,96), n_total_so_far, tag, seconds_since_start, utterance_serial)
         self._quit = False
         threading.Thread(target=self._reader, daemon=True).start()
 
@@ -312,6 +421,12 @@ class CameraProcess:
                 continue
             if msg[0] == "preview":
                 self.preview_jpeg, self.meta = msg[1], msg[2]
+            elif msg[0] == "partial":
+                if self.on_partial:
+                    try: self.on_partial(msg[1], msg[2], msg[3], msg[4], msg[5])
+                    except Exception as e: print("[camera] on_partial:", e)
+            elif msg[0] == "finished":
+                self.listening = False
             elif msg[0] == "opened":
                 self.opened, self.index = True, msg[1]
                 if getattr(self, "_auto", False):
@@ -346,6 +461,11 @@ class CameraProcess:
         msg = self.responses.get(timeout=timeout)
         assert msg[0] == "utterance", msg
         return self._utt(msg)
+
+    def finish(self):
+        """End the current utterance now (the server already committed on the streamed crops)."""
+        self.listening = False
+        self._send(("finish",))
 
     def snapshot_last(self, seconds, timeout=10.0):
         if not self._send(("snapshot", seconds)):
