@@ -71,6 +71,8 @@ def main():
     a = ap.parse_args()
     paths = sorted(glob.glob(os.path.join(os.path.expanduser(a.miracl), "*/*/*.mp4"))) if a.miracl else []
     paths += a.clips
+    if not paths:
+        ap.error("no clips: pass --miracl DIR and/or --clips FILE...")
     vp = VideoProcess(convert_gray=True)
     rng = np.random.default_rng(0)
     tally, fails, t_batch, t_finish, t_frame = {}, [], [], [], []
