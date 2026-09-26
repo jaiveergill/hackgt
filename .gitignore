@@ -14,3 +14,4 @@ models/adapted_*/
 data/gestures/hagrid/*/
 .env.local
 data/profiles/
+logs/

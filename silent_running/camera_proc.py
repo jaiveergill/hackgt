@@ -218,6 +218,7 @@ def _worker(conn, spec, width, height, preview_width, buffer_seconds):
     conn.send(("opened", src.info()))
     out = _Outbox(conn)
     signals.attach(out.send)  # after "opened": its sends go through the outbox like every other worker message
+    stats_t0, stats_prev, stats_iv, stats_gaps, stats_face, lm_prev_face = time.time(), None, [], [], 0, False
     STALL_S, MAX_RETRY_S = 1.5, 8.0  # report + reopen a live camera after 1.5 s without frames; back off to 8 s while it stays gone
     last_frame = last_reopen = time.time()
     retry_s = STALL_S
@@ -289,7 +290,7 @@ def _worker(conn, spec, width, height, preview_width, buffer_seconds):
             if src.finished:
                 continue
             now = time.time()
-            if src.kind != "file" and now - last_frame >= STALL_S and now - last_reopen >= retry_s:
+            if src.kind != "file" and now - last_frame >= getattr(src, "stall_s", STALL_S) and now - last_reopen >= retry_s:
                 # unplugged / dead camera: say so (UI error event) and try to reopen instead of freezing silently
                 out.send(("error", f"{src.kind} camera delivered no frames for {now - last_frame:.1f}s; reopening"))
                 try:
@@ -302,6 +303,20 @@ def _worker(conn, spec, width, height, preview_width, buffer_seconds):
             time.sleep(0.005)
             continue
         last_frame, retry_s = time.time(), STALL_S
+        # ---- frame arrival stats for the session log (every 5 s): fps, p95 interval, gaps > 0.3 s, worst gap, face rate
+        if stats_prev is not None and not src.discontinuity:
+            d = ts - stats_prev
+            stats_iv.append(d)
+            if d > 0.3:
+                stats_gaps.append(round(d, 2))
+        stats_prev = ts
+        stats_face += 1 if lm_prev_face else 0
+        if ts - stats_t0 >= 5.0 and stats_iv:
+            iv = sorted(stats_iv)
+            out.send(("stats", {"fps": round(len(stats_iv) / (ts - stats_t0), 1), "p50_ms": round(iv[len(iv) // 2] * 1000), "p95_ms": round(iv[int(len(iv) * 0.95)] * 1000),
+                                "max_ms": round(iv[-1] * 1000), "gaps": stats_gaps[-10:], "n_gaps": len(stats_gaps), "face_rate": round(stats_face / max(len(stats_iv), 1), 2),
+                                "source": src.info(), "listening": listen_start is not None or auto_start is not None}))
+            stats_t0, stats_iv, stats_gaps, stats_face = ts, [], [], 0
         if src.discontinuity:  # file looped: don't count the jump as mouth motion
             prev_patch = None
         rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
@@ -309,6 +324,7 @@ def _worker(conn, spec, width, height, preview_width, buffer_seconds):
             lm, bs = fl(rgb, (ts - t_origin) * 1000.0)
         except Exception as e:
             print("[camera] detect failed:", e); lm, bs = None, None
+        lm_prev_face = lm is not None
         buffer.append((ts, rgb, lm))
         if cropper is not None:
             cropper.feed(ts, rgb, lm)
@@ -419,6 +435,8 @@ class CameraProcess:
         self.listening = False
         self.on_auto_utterance = None
         self.on_error = None
+        self.stats = None
+        self.on_stats = None   # capture-process frame stats every 5 s (session log)
         self.on_signal = None  # must return immediately: it runs on the reader thread (the server only queues the signal)
         self._quit = False
         threading.Thread(target=self._reader, daemon=True).start()
@@ -532,6 +550,10 @@ class CameraProcess:
                 self.fatal = msg[1]
             if self.on_error:
                 self.on_error(msg[1])
+        elif msg[0] == "stats":
+            self.stats = msg[1]
+            if self.on_stats:
+                self.on_stats(msg[1])
         elif msg[0] == "signal":
             if self.on_signal:
                 self.on_signal(msg[1])
