@@ -101,12 +101,16 @@ function result(rows,{nonverbal,emotion='neutral',intensity=0,changed=false,dur=
 function decision(u,text,confidence,source,reason,alternatives=[],action='speak',provider='grok-4 · xAI'){
   ev({type:'decision',utt_id:u,text,confidence,source,reason,provider,alternatives,action});}
 function audioSoon(u){setTimeout(()=>latMark(u,'audio'),180+Math.random()*120);}  // the demo may have no audible voice until the page is clicked
-async function ask(u,candidate,attempt,scripted){
-  ev({type:'confirm',utt_id:u,candidate,attempt,state:'asking'});answer=null;
+async function ask(u,candidate,confidence,attempt,scripted){  // the server's confirm loop (silent_running/confirm.py) as events; Y / N answer as the nurse
+  ev({type:'confirm',utt_id:u,candidate,confidence,attempt,state:'asking',say:`Sounds like: ${candidate}?`,say_voice:'system',timeout:4});answer=null;const t0=now();
   for(let t=0;t<2000&&answer===null;t+=50)await sleep(50);
-  const yes=answer!==null?answer:scripted;
+  const yes=answer!==null?answer:scripted,by=answer!==null?'nurse':(yes?'nod':'shake');
   if(answer===null){if(yes){F.nod=performance.now()/1000;signal('nod','yes',.94);}else{F.shake=performance.now()/1000;signal('shake','no',.91);}await sleep(700);}
-  ev({type:'confirm',utt_id:u,candidate,attempt,state:yes?'confirmed':'rejected'});return yes;
+  const latency={answer:now()-t0};
+  if(yes){ev({type:'confirm',utt_id:u,candidate,attempt,state:'confirmed',by,latency,say:candidate,say_voice:'patient'});
+    decision(u,candidate,1,by==='nurse'?'nurse':'gesture',`patient confirmed (${by}) on attempt ${attempt}`,[],'speak','vsr');}
+  else ev({type:'confirm',utt_id:u,candidate,attempt,state:'rejected',by,latency});
+  return yes;
 }
 
 // ---------------------------------------------------------------- scenes
@@ -131,7 +135,7 @@ const SCENES=[
    await sleep(420);
    decision(u,'I am hot',.44,'fused','“Hot” and “cold” look almost identical on the lips (41% vs 38%), and the question fits both. Asking the patient to confirm.',[{text:'I am cold',confidence:.4},{text:'I need a blanket',confidence:.1}],'confirm');
    audioSoon(u);
-   if(!await ask(u,'I am hot',1,false)){await sleep(600);if(await ask(u,'I am cold',2,true))patientSays('I am cold',.95,{source:'fused'});}
+   if(!await ask(u,'I am hot',.41,1,false)){await sleep(600);if(await ask(u,'I am cold',.4,2,true))patientSays('I am cold',.95,{source:'fused'});}
    else patientSays('I am hot',.95,{source:'fused'});
    await sleep(3500);}},
  {name:'Yes / no by blink code',async run(){
@@ -144,8 +148,8 @@ const SCENES=[
    nurse('Okay, I will call them now.');await sleep(1800);
    await mouth(1500);F.grimace=1;signal('pain',.82,.8);await sleep(360);
    const u=result([["I can't breathe",.62,.83],['I can breathe better now',.14,.08],['I need to cough',.1,.05],['I need suction',.06,.03]],{nonverbal:nv({pain:.82,emotion:'scared',intensity:.8}),emotion:'sad',intensity:.8});
-   ev({type:'alert',utt_id:u,text:"I can't breathe",confidence:.83,ts:now()});
    await sleep(300);decision(u,"I can't breathe",.92,'fused','Critical phrase. Lips 62% and a strong distress face; escalating.',[{text:'I need suction',confidence:.04}]);
+   ev({type:'alert',utt_id:u,text:"I can't breathe",confidence:.83,ts:now()});  // after its decision, as the server sends it
    patientSays("I can't breathe",.92,{source:'fused',critical:true});
    await sleep(5500);$('#alert').classList.remove('on');speechSynthesis.cancel();F.grimace=0;await sleep(1200);}},
 ];
@@ -161,7 +165,7 @@ transport.send=async o=>{
   else if(o.cmd==='nurse'){status('nurse_listening');await wait(2200);status('idle');nurse('Are you comfortable?');}
   else if(o.cmd==='mode'){ev({type:'state',state:{mode:o.mode}});}
   else if(o.cmd==='context'){ctx();}
-  else if(o.cmd==='confirm_answer'){answer=o.answer==='yes';}
+  else if(o.cmd==='answer'){answer=o.value==='yes';}
 };
 
 // ---------------------------------------------------------------- demo bar + runner
