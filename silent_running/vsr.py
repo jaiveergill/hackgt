@@ -10,7 +10,7 @@ Exposes three levels of output from the *same* video encoding:
                                  constrained decoding against a phrase inventory
   * ctc_greedy(enc)           -> instant, cheap transcript
 """
-import os, sys, time, json, threading
+import os, sys, time, json, threading, copy, contextlib
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -40,6 +40,11 @@ import sentencepiece  # noqa: E402
 MODEL_DIR = os.path.join(ROOT, "models", "LRS3_V_WER19.1")
 SPM_MODEL = os.path.join(ROOT, "third_party", "auto_avsr", "spm", "unigram", "unigram5000.model")
 LM_DIR = os.path.join(ROOT, "models", "lm_en_subword")
+PREFILTER = 48  # phrases rescored by the attention decoder after the CTC prefilter
+
+
+def _round_up(n, m):
+    return -(-n // m) * m
 
 
 class VSREngine:
@@ -75,6 +80,11 @@ class VSREngine:
         self.video_transform = VideoTransform(speed_rate=1)
         self.load_time = time.time() - t0
         self.mps_lock = threading.Lock()  # MPS is not safe to use from two threads at once (Metal command buffer assertion)
+        # Phrase scoring is one batched teacher-forced pass over the shortlist: on the GPU that is ~3x faster than on the CPU,
+        # so it gets its own copy of the attention decoder there. The beam search keeps the CPU copy (thousands of tiny ops,
+        # where GPU launch overhead dominates), and the copy keeps scoring clear of ESPnet's per-call state on that module.
+        self.score_device = self.device if self.device.type == "mps" else self.decode_device
+        self.score_decoder = self.model.decoder if self.score_device == self.decode_device else copy.deepcopy(self.model.decoder).to(self.score_device).eval()
 
     # ------------------------------------------------------------------ preprocessing
     def landmarks_for_frames(self, frames_rgb):
@@ -112,11 +122,24 @@ class VSREngine:
                 torch.mps.synchronize()
         return enc
 
-    def warmup(self, n_frames=50):
+    def warmup(self, n_frames=50, shortlist=PREFILTER):
+        """Run the live path's kernels once. On the GPU, every new shape of a phrase-scoring call builds and compiles its
+        kernels (0.1-0.7 s once, measured); _score_phrases_full pads its calls to a few shapes, all of which run here:
+        the free transcript (batch 1) and a shortlist of `shortlist` phrases (plus a few enrolled ones outside it) for
+        utterances up to 7 s. That adds ~6 s to startup (M2)."""
         x = torch.zeros(1, n_frames, 88, 88)
         enc = self.encode(x)
         self.ctc_greedy(enc)
         self.score_phrases(enc, ["warm up"])
+        if self.score_device.type != "mps":
+            return
+        for T in range(16, 177, 16):  # encoder frames (25 fps)
+            e = torch.zeros(T, enc.shape[1])
+            for L in range(8, 49, 8):  # "A A ... A" is L - 1 tokens
+                self._score_phrases_full(e, [" ".join(["A"] * (L - 1))])
+            for B in (shortlist, shortlist + 1):
+                for L in (8, 16):
+                    self._score_phrases_full(e, [" ".join(["A"] * (L - 1))] * B)
 
     def _ids_to_text(self, ids):
         return "".join(self.token_list[i] for i in ids if i not in (0, self.eos)).replace("▁", " ").strip()
@@ -156,7 +179,7 @@ class VSREngine:
         return ctc.tolist()
 
     @torch.no_grad()
-    def score_phrases(self, enc, phrases, prefilter=48, always=()):
+    def score_phrases(self, enc, phrases, prefilter=PREFILTER, always=()):
         """Exact log p(phrase | video) under the pretrained model for every candidate phrase.
 
         Returns list of dicts sorted by combined score (descending):
@@ -182,36 +205,43 @@ class VSREngine:
 
     @torch.no_grad()
     def _score_phrases_full(self, enc, phrases):
-        dev = self.decode_device
+        dev = self.score_device
         toks = [self.tokenize(p) for p in phrases]
-        B = len(toks)
-        L = max(len(t) for t in toks) + 1
-        ys_in = torch.full((B, L), self.eos, dtype=torch.long)
-        ys_out = torch.full((B, L), -1, dtype=torch.long)
-        for b, t in enumerate(toks):
+        B, L, T = len(toks), max(len(t) for t in toks) + 1, enc.shape[0]
+        if dev.type == "mps":
+            # Pad to a few shapes that warmup() compiled: rows to a multiple of 8, tokens to 8, encoder frames to 16. Exact up to
+            # float rounding (< 1e-4 nats, scripts/check_scorer.py): padded rows are dropped, padded tokens come after each row's
+            # end under the causal mask, padded frames are masked out of the attention.
+            Bp, L, Tp = (B if B == 1 else _round_up(B, 8)), _round_up(L, 8), _round_up(T, 16)
+        else:
+            Bp, Tp = B, T
+        ys_in = torch.full((Bp, L), self.eos, dtype=torch.long)
+        ys_out = torch.full((Bp, L), -1, dtype=torch.long)
+        for b, t in enumerate(toks + [toks[-1]] * (Bp - B)):
             ys_in[b, 0] = self.sos
             ys_in[b, 1:len(t) + 1] = torch.tensor(t)
             ys_out[b, :len(t)] = torch.tensor(t)
             ys_out[b, len(t)] = self.eos
-        ys_in, ys_out = ys_in.to(dev), ys_out.to(dev)
-        ys_mask = subsequent_mask(L, device=dev).unsqueeze(0).expand(B, -1, -1)
-        memory = enc.unsqueeze(0).expand(B, -1, -1)
-        logits, _ = self.model.decoder(ys_in, ys_mask, memory, None)
-        logp = F.log_softmax(logits, dim=-1)
-        tgt = ys_out.clamp(min=0)
-        tok_lp = logp.gather(-1, tgt.unsqueeze(-1)).squeeze(-1)
-        tok_lp = tok_lp.masked_fill(ys_out < 0, 0.0)
-        att = tok_lp.sum(-1)  # (B,)
+        with self.mps_lock if dev.type == "mps" else contextlib.nullcontext():
+            ys_in, ys_out = ys_in.to(dev), ys_out.to(dev)
+            ys_mask = subsequent_mask(L, device=dev).unsqueeze(0).expand(Bp, -1, -1)
+            memory = F.pad(enc, (0, 0, 0, Tp - T)).to(dev).unsqueeze(0).expand(Bp, -1, -1)
+            memory_mask = (torch.arange(Tp, device=dev) < T).view(1, 1, Tp).expand(Bp, -1, -1) if Tp > T else None
+            logits, _ = self.score_decoder(ys_in, ys_mask, memory, memory_mask)
+            logp = F.log_softmax(logits, dim=-1)
+            tgt = ys_out.clamp(min=0)
+            tok_lp = logp.gather(-1, tgt.unsqueeze(-1)).squeeze(-1)
+            tok_lp = tok_lp.masked_fill(ys_out < 0, 0.0)
+            att = tok_lp.sum(-1)[:B].cpu()  # (B,)
 
         # CTC forward log-likelihood per phrase
         ctc_lp = self.model.ctc.log_softmax(enc.unsqueeze(0))[0]  # (T', V)
         T = ctc_lp.size(0)
         log_probs = ctc_lp.unsqueeze(1).expand(-1, B, -1)  # (T', B, V)
-        targets = torch.cat([torch.tensor(t) for t in toks]).to(dev)
+        targets = torch.cat([torch.tensor(t) for t in toks])
         tgt_lens = torch.tensor([len(t) for t in toks])
         in_lens = torch.full((B,), T, dtype=torch.long)
-        ctc = -F.ctc_loss(log_probs.cpu().float(), targets.cpu(), in_lens, tgt_lens, blank=0, reduction="none", zero_infinity=True)
-        att = att.cpu()
+        ctc = -F.ctc_loss(log_probs.cpu().float(), targets, in_lens, tgt_lens, blank=0, reduction="none", zero_infinity=True)
         score = (1 - self.ctc_weight) * att + self.ctc_weight * ctc
         res = []
         for b, p in enumerate(phrases):

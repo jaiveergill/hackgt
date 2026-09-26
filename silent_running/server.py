@@ -13,7 +13,7 @@ from fastapi.staticfiles import StaticFiles
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
-from silent_running.vsr import VSREngine, load_phrases, load_phrase_table, _read_video
+from silent_running.vsr import VSREngine, PREFILTER, load_phrases, load_phrase_table, _read_video
 from silent_running.camera_proc import CameraProcess
 from silent_running.signals.aggregate import nonverbal_dict
 from silent_running.context import ContextStore, OpenAIChooser
@@ -908,8 +908,8 @@ def main():
     STATE["model_dir"] = os.path.relpath(args.model_dir, ROOT) if args.model_dir else "models/LRS3_V_WER19.1"
     if args.voice:
         STATE["voice"] = args.voice
-    engine.warmup()
-    print(f"[engine] loaded + warmed in {time.time()-t0:.1f}s (encoder on {engine.device}, decoder on {engine.decode_device})")
+    engine.warmup(shortlist=min(PREFILTER, len(phrases)))  # the batch the phrase scorer runs for this inventory
+    print(f"[engine] loaded + warmed in {time.time()-t0:.1f}s (encoder on {engine.device}, decoder on {engine.decode_device}, phrase scoring on {engine.score_device})")
     context = ContextStore()
     phrase_decoder = PhraseDecoder(engine, phrases, context, gamma=args.gamma)
     if args.profile:
