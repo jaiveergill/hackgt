@@ -10,6 +10,8 @@ Also prints a summary table. Never fakes outputs: whatever the model says is wha
 import os, sys, json, time, argparse, collections
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from silent_running.vsr import VSREngine, load_phrases, ROOT
+from silent_running.decoder import PhraseDecoder
+from silent_running.context import ContextStore
 import torch
 
 def norm(s):
@@ -33,7 +35,8 @@ def main():
         recs = recs[: args.limit]
     phrases = load_phrases()
     eng = VSREngine(device=args.device, beam_size=args.beam, ctc_weight=args.ctc_weight)
-    eng.warmup()  # note: live server latency is lower still (GPU keep-warm thread); eval numbers include cold-shape costs
+    eng.warmup(phrases)  # note: live server latency is lower still (GPU keep-warm thread); eval numbers include cold-shape costs
+    dec = PhraseDecoder(eng, phrases, ContextStore())  # the server's phrase scoring, without context: judges the lips alone
     os.makedirs(os.path.join(ROOT, "results"), exist_ok=True)
     out_path = os.path.join(ROOT, "results", f"{args.tag}.jsonl")
     out = open(out_path, "w")
@@ -59,7 +62,7 @@ def main():
         no_speech = not greedy.strip()  # same guard the server uses: empty CTC = mouth did not move like speech
         nbest = eng.beam_search(enc, 5)
         t3 = time.time()
-        ranking = eng.score_phrases(enc, phrases)
+        ranking = dec.decode(enc)["ranking"]
         t4 = time.time()
         truth = norm(r["phrase"])
         ranked = [norm(x["phrase"]) for x in ranking]
@@ -74,7 +77,7 @@ def main():
                "latency": {"preprocess": t1 - t0, "encode": t2 - t1, "beam": t3 - t2, "phrase_score": t4 - t3}}
         out.write(json.dumps(rec) + "\n"); out.flush()
         mark = ("OK " if c1 else ("t3 " if c3 else "XX ")) + ("[no-speech] " if no_speech else "")
-        print(f"{mark} [{r['speaker']}] '{r['phrase']}'  raw='{nbest[0]['text']}'  top1='{ranking[0]['phrase']}' ({ranking[0]['score']:.1f} vs {ranking[1]['score']:.1f} {ranking[1]['phrase']})")
+        print(f"{mark} [{r['speaker']}] '{r['phrase']}'  raw='{nbest[0]['text']}'  top1='{ranking[0]['phrase']}' ({ranking[0]['final_score']:.1f} vs {ranking[1]['final_score']:.1f} {ranking[1]['phrase']})")
     out.close()
     if n:
         print(f"\n== {args.tag}: n={n} top1={top1/n:.2%} top3={top3/n:.2%} raw_exact={raw_exact/n:.2%}")

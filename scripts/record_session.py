@@ -16,7 +16,7 @@ and a manifest at data/session/<speaker>/manifest.jsonl with the prompt text.
 
 Controls: SPACE start / stop the take, r re-record last, n skip, q quit.
 """
-import argparse, os, sys, json, time, re, subprocess, signal
+import argparse, os, json, time, subprocess
 import cv2
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

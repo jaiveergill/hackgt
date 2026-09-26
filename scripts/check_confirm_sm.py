@@ -117,7 +117,7 @@ rois = np.zeros((20, 96, 96), np.uint8)
 
 EVENTS.clear()
 server.work_lock.acquire()  # the previous utterance is still decoding ...
-th = threading.Thread(target=server.run_decode, args=(rois, 20, 20, 0.8)); th.start()  # ... when "yes" ends and queues
+th = threading.Thread(target=server.run_decode, args=(rois, 0.8)); th.start()  # ... when "yes" ends and queues
 time.sleep(0.2)
 server.confirm_loop.start(question(100, "Water", "Cold"))  # the previous decode then asks about its own guess
 server.work_lock.release(); th.join()
@@ -132,7 +132,7 @@ server.confirm_loop.cancel()
 EVENTS.clear()
 server.confirm_loop.start(question(200, "Water", "Cold"))
 time.sleep(0.05)
-server.run_decode(rois, 20, 20, 0.8)  # "yes" mouthed after the question
+server.run_decode(rois, 0.8)  # "yes" mouthed after the question
 fin = [(e["state"], e["candidate"], e.get("by")) for e in events("confirm", utt_id=200) if e["state"] != "asking"]
 check("yes mouthed after the question answers it", [("confirmed", "Water", "lips")], fin)
 wait_for(lambda: events("decision", utt_id=200, action="speak"))

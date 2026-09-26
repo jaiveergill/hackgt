@@ -33,11 +33,11 @@ const V=Date.now();document.write(`<link rel="stylesheet" href="/static/app.css?
       <svg id="overlay" viewBox="0 0 640 480" preserveAspectRatio="xMidYMid slice"><g id="ovbox"></g></svg>
       <div class="badge"><div class="dot" id="dot"></div><span id="track">looking for face…</span></div>
       <div class="badge handsbadge" id="hands" hidden></div>
-      <div class="badge meter" id="meter">face <span>angry <b><i id="m_angry"></i></b></span><span>warm <b><i id="m_warm"></i></b></span><span>sad <b><i id="m_sad"></i></b></span></div>
+      <div class="badge meter">face <span>angry <b><i id="m_angry"></i></b></span><span>warm <b><i id="m_warm"></i></b></span><span>sad <b><i id="m_sad"></i></b></span></div>
       <div class="state idle" id="state">idle</div>
       <div class="hint">Face the camera. Hold <kbd>Listen</kbd> (or <kbd>space</kbd>), mouth the phrase silently, release.</div>
     </div>
-    <div class="signals" id="signals">
+    <div class="signals">
       <div class="sig" id="sig-mouthing"><label>Mouthing</label><div class="v"><i class="pulse"></i><span>—</span></div></div>
       <div class="sig" id="sig-head"><label>Head</label><div class="v"><span>—</span></div></div>
       <div class="sig" id="sig-blink"><label>Blink code</label><div class="v"><span>—</span></div></div>
@@ -50,7 +50,7 @@ const V=Date.now();document.write(`<link rel="stylesheet" href="/static/app.css?
       <h3>What is this about? <span class="h3sub">optional, helps disambiguate</span></h3>
       <div class="chips" id="chips"></div>
     </div>
-    <details class="panel slim" id="voicebox">
+    <details class="panel slim">
       <summary>Voice &amp; delivery</summary>
       <div class="settings">
         <label>voice <select id="voice"></select></label>
@@ -72,7 +72,7 @@ const V=Date.now();document.write(`<link rel="stylesheet" href="/static/app.css?
     </div>
 
     <div class="hero" id="hero" data-state="idle" data-src="lips">
-      <div class="ring" id="ring">
+      <div class="ring">
         <svg viewBox="0 0 120 120"><circle class="track" cx="60" cy="60" r="52"/><circle class="arc" id="ringarc" cx="60" cy="60" r="52"/><circle class="cd" id="ringcd" cx="60" cy="60" r="44"/></svg>
         <div class="pct" id="ringpct">—</div>
         <div class="ringlbl">confidence</div>
@@ -81,7 +81,7 @@ const V=Date.now();document.write(`<link rel="stylesheet" href="/static/app.css?
         <div class="eyebrow"><span class="src" id="src">lips</span><span id="eyebrow">Waiting for the patient</span></div>
         <div class="text placeholder" id="bigtext">Hold Listen and mouth a phrase</div>
         <div class="reason" id="reason"></div>
-        <div class="confirmbar" id="confirmbar">
+        <div class="confirmbar">
           <div class="cdbar"><i id="cdfill"></i></div>
           <div class="confirmrow"><span id="confirmhint">Nod to confirm · shake for the next guess</span>
             <button class="yes" id="cyes">✓ Yes</button><button class="no" id="cno">✗ No</button></div>
@@ -155,7 +155,7 @@ const V=Date.now();document.write(`<link rel="stylesheet" href="/static/app.css?
       <button class="btn sm" id="nbestbtn">Open-vocabulary beam n-best of the last utterance (~1 s)</button>
       <div class="lat" id="lat"></div>
     </div>
-    <div class="panel" id="delivpanel">
+    <div class="panel">
       <h3>Delivery · face sets the emotion, mouth sets the timing</h3>
       <div id="deliv" class="small">No utterance yet.</div>
       <div class="strip" id="strip"></div>
@@ -178,7 +178,7 @@ const V=Date.now();document.write(`<link rel="stylesheet" href="/static/app.css?
 </main>
 
 <div class="toasts" id="err"></div>
-<div id="alert"><div class="alertkicker">Critical · patient says</div><div class="t" id="alerttext"></div><div class="s" id="alertsub">Critical phrase recognized · speaking twice</div><button id="alertok">Acknowledge</button></div>
+<div id="alert"><div class="alertkicker">Critical · patient says</div><div class="t" id="alerttext"></div><div class="s">Critical phrase recognized · speaking twice</div><button id="alertok">Acknowledge</button></div>
 <div id="demobar"></div>
 
 <script>document.write(`<script src="/static/app.js?v=${V}"><\/script><script src="/static/demo.js?v=${V}"><\/script>`);</script>

@@ -9,12 +9,12 @@ does, the question still times out PROMPT_WAIT + TIMEOUT s after it was asked.
 Answers come from nonverbal `signal` events (nod/shake, blink code, thumbs), a mouthed yes/no, or the nurse's Y / N
 keys. The loop only sees "yes" / "no" plus where it came from.
 """
-import os, threading, time
+import threading, time
 
-SPEAK_CONF = float(os.environ.get("CONFIRM_SPEAK_CONF", 0.6))  # at or above this (and in-inventory): speak directly
+SPEAK_CONF = 0.6  # at or above this (and in-inventory): speak directly
 MIN_ALT_CONF = 0.05          # alternatives below this probability are not offered
 MAX_ATTEMPTS = 3             # candidates offered before giving up
-TIMEOUT = float(os.environ.get("CONFIRM_TIMEOUT", 4.0))  # s the patient has to answer once the prompt has played
+TIMEOUT = 4.0  # s the patient has to answer once the prompt has played
 # s allowed for the prompt to play before the answer window starts anyway (nobody reported playback end). Prompts use the
 # local system voice (no network): over the phrase bank "Sounds like: X?" lasts 2.2 s median, 3.2 s max (say -v Daniel),
 # and a played() report arriving within PROMPT_WAIT + TIMEOUT still restarts the window.

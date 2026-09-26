@@ -10,7 +10,7 @@ Exposes three levels of output from the *same* video encoding:
                                  constrained decoding against a phrase inventory
   * ctc_greedy(enc)           -> instant, cheap transcript
 """
-import os, sys, time, json, threading, copy, contextlib
+import os, sys, time, threading, copy, contextlib
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -48,7 +48,7 @@ def _round_up(n, m):
 
 
 class VSREngine:
-    def __init__(self, device="mps", decode_device="cpu", beam_size=10, ctc_weight=0.1, model_dir=MODEL_DIR, half=False, lm_weight=0.0, lm_dir=LM_DIR):
+    def __init__(self, device="mps", decode_device="cpu", beam_size=10, ctc_weight=0.1, model_dir=MODEL_DIR, lm_weight=0.0, lm_dir=LM_DIR):
         """device: where the visual frontend + conformer encoder run (mps is ~15x faster than cpu on Apple Silicon).
         decode_device: where the transformer decoder / CTC head / beam search run (cpu is fastest: many tiny ops)."""
         if device == "mps" and not torch.backends.mps.is_available():
@@ -56,7 +56,6 @@ class VSREngine:
         self.device = torch.device(device)
         self.decode_device = torch.device(decode_device)
         self.ctc_weight = ctc_weight
-        self.lm_weight = lm_weight
         t0 = time.time()
         self.avsr = AVSR("video", os.path.join(model_dir, "model.pth"), os.path.join(model_dir, "model.json"),
                          rnnlm=os.path.join(lm_dir, "model.pth") if lm_weight > 0 else None,
@@ -66,8 +65,6 @@ class VSREngine:
         self.model = self.avsr.model
         # hybrid placement: encoder on `device`, decoder+ctc on `decode_device`
         self.model.encoder.to(self.device)
-        self.enc_dtype = torch.float16 if (half and self.device.type == "mps") else torch.float32
-        self.model.encoder.to(self.enc_dtype)
         self.model.decoder.to(self.decode_device)
         self.model.ctc.to(self.decode_device)
         self.avsr.beam_search.to(self.decode_device)
@@ -115,9 +112,9 @@ class VSREngine:
     def encode(self, x):
         """(1,T,88,88) -> (T', 768) encoder output, returned on decode_device in fp32."""
         with self.mps_lock:
-            x = x.to(self.device, self.enc_dtype)
+            x = x.to(self.device)
             enc = self.model.encode(x)  # (T', 768)
-            enc = enc.float().to(self.decode_device)
+            enc = enc.to(self.decode_device)
             if self.device.type == "mps":
                 torch.mps.synchronize()
         return enc

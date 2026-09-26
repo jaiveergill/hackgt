@@ -67,8 +67,7 @@ def accuracy(engine, clips, inventory, k):
 def utterance(engine, path):
     frames = frames_25fps(path)
     lms = engine.landmarks_for_frames(frames)
-    return {"rois": engine.mouth_rois(frames, lms), "n_face": sum(l is not None for l in lms), "n_total": len(lms),
-            "duration": len(frames) / 25.0, "t_crop": 0.0}
+    return {"rois": engine.mouth_rois(frames, lms), "duration": len(frames) / 25.0, "t_crop": 0.0}
 
 
 def server_flow(engine, clips, inventory):
