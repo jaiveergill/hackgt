@@ -309,7 +309,7 @@ class CameraProcess:
         self.listening = False
         self.on_auto_utterance = None
         self.on_error = None
-        self.on_signal = None
+        self.on_signal = None  # must return immediately: it runs on the reader thread (the server only queues the signal)
         self._quit = False
         threading.Thread(target=self._reader, daemon=True).start()
 
@@ -416,15 +416,15 @@ class CameraProcess:
             self.opened, self.source_info = True, msg[1]
             if getattr(self, "_auto", False):
                 self._send(("auto", True))
-        elif msg[0] == "signal":
-            if self.on_signal:
-                self.on_signal(msg[1])
         elif msg[0] in ("fatal", "error"):
             print("[camera]", msg[1])
             if msg[0] == "fatal":
                 self.fatal = msg[1]
             if self.on_error:
                 self.on_error(msg[1])
+        elif msg[0] == "signal":
+            if self.on_signal:
+                self.on_signal(msg[1])
         elif msg[0] == "utterance" and len(msg) > 7 and msg[7] == "auto":
             if self.on_auto_utterance:
                 self.on_auto_utterance(self._utt(msg))
