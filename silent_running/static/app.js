@@ -54,6 +54,7 @@ function drawOverlay(m){
 }
 
 // ---------- status
+function setWarm(w){$('#warmup').hidden=w!==false;}  // shown only while the server says it is still warming (demo mode never does)
 let heroBefore={state:'idle',eyebrow:''};  // restored when processing ends without anything replacing the hero (a quiet answer, an error)
 let enrolling=false;  // the hero shows the enrollment prompt; cleared when the session ends
 function setState(s,extra){
@@ -70,7 +71,7 @@ function setState(s,extra){
 // ---------- event dispatch
 function handle(m){
   logEvent(m);
-  if(m.type==='hello'){setState(m.state.status);phrases=m.phrases;phraseTable=m.phrase_table||[];applyCtx(m.context);mode=m.state.mode;syncMode();if(m.state.expressive!=null)$('#expressive').checked=m.state.expressive;
+  if(m.type==='hello'){setState(m.state.status);setWarm(m.state.warm);phrases=m.phrases;phraseTable=m.phrase_table||[];applyCtx(m.context);mode=m.state.mode;syncMode();if(m.state.expressive!=null)$('#expressive').checked=m.state.expressive;
     $('#nphr').textContent=phrases.length+' phrases';$('#phrlist').innerHTML=phrases.map(p=>`<span>${esc(p)}</span>`).join('');buildChips();$('#log').innerHTML=LOG_EMPTY;(m.log||[]).forEach(addLog);
     if(!DEMO){if(!$('#cam').getAttribute('src'))$('#cam').src='/stream?session='+Date.now();fetch('/api/state').then(r=>r.json()).then(s=>{$('#engine').textContent=`${s.engine.model} · ${phrases.length} phrases`;});}}
   else if(m.type==='status'){setState(m.status,m.stage);if(m.status==='processing'&&m.stage==='crop')toast('');}
@@ -86,7 +87,7 @@ function handle(m){
   else if(m.type==='log'){addLog(m.entry);}
   else if(m.type==='error'){toast(m.message);}  // a failed decode comes with its own idle status
   else if(m.type==='context'){applyCtx(m.context);}
-  else if(m.type==='state'){mode=m.state.mode;syncMode();}
+  else if(m.type==='state'){mode=m.state.mode;syncMode();setWarm(m.state.warm);}
   else if(m.type==='prewarmed'){$('#clonestat').textContent=`voice “${m.speaker}” ready · ${m.n} phrase variants cached`;}
   else if(m.type==='saved'){toast('saved '+m.file+' as "'+m.phrase+'"',true);}
 }
