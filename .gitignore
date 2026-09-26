@@ -11,5 +11,6 @@ data/session/
 data/voices/
 data/tts_cache/
 models/adapted_*/
+data/gestures/hagrid/*/
 .env.local
 data/profiles/
