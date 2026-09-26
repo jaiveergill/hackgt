@@ -88,6 +88,12 @@ const V=Date.now();document.write(`<link rel="stylesheet" href="/static/app.css?
         </div>
         <div class="conf" id="conf"></div>
         <div class="alts" id="alts"></div>
+        <div class="labelrow" id="labelrow" hidden>
+          <span>Was this right?</span><button id="lblok">✓ Right</button>
+          <input id="lbltext" list="phrasedl" placeholder="✗ Wrong: what was actually said?" autocomplete="off"><button id="lblsave">Save</button>
+          <span id="lblstat"></span>
+        </div>
+        <datalist id="phrasedl"></datalist>
       </div>
     </div>
 
