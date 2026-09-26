@@ -74,8 +74,10 @@ def _worker(conn, index, width, height, preview_width, buffer_seconds):
     sys.path.insert(0, ROOT); sys.path.insert(0, os.path.join(ROOT, "third_party", "chaplin"))
     from pipelines.detectors.mediapipe.video_process import VideoProcess  # cv2/skimage only, no torch
     from silent_running.expression import FaceLandmarker, ExpressionTracker
+    from silent_running.signals.aggregate import Signals
     fl = FaceLandmarker()
     expr = ExpressionTracker()
+    signals = Signals(conn.send)
     class _Det:  # adapter so the probing code below keeps working
         def detect(self, frames, _):
             return [fl(f)[0] for f in frames]
@@ -138,7 +140,7 @@ def _worker(conn, index, width, height, preview_width, buffer_seconds):
         try:
             t0 = time.time()
             rois = vp(frames, list(lms))
-            conn.send(("utterance", rois, n_face, len(lms), dur, None, time.time() - t0, tag, expression))
+            conn.send(("utterance", rois, n_face, len(lms), dur, None, time.time() - t0, tag, expression, signals.summary(start, end, expression)))
         except Exception as e:
             conn.send(("utterance", None, n_face, len(lms), dur, f"crop failed: {e}", 0.0, tag))
 
@@ -179,6 +181,7 @@ def _worker(conn, index, width, height, preview_width, buffer_seconds):
             print("[camera] detect failed:", e); lm, bs = None, None
         buffer.append((ts, rgb, lm))
         expr.update(bs, listen_start is not None or auto_start is not None)
+        signals.update(rgb, ts, lm)
         # ---- mouth-motion energy (translation-compensated: patch is re-centred on the mouth every frame)
         patch = None
         if lm is not None:
@@ -242,6 +245,7 @@ def _worker(conn, index, width, height, preview_width, buffer_seconds):
             cv2.rectangle(frame, (bbox[0], bbox[1]), (bbox[2], bbox[3]), color, 2)
             for p in pts[:3]:
                 cv2.circle(frame, tuple(p), 3, color, -1)
+        signals.draw(frame)
         if listening:
             cv2.circle(frame, (w - 28, 28), 12, (0, 0, 255), -1)
         if preview_width and w != preview_width:
@@ -274,6 +278,7 @@ class CameraProcess:
         self.responses = queue.Queue()
         self.listening = False
         self.on_auto_utterance = None
+        self.on_signal = None
         self._quit = False
         threading.Thread(target=self._reader, daemon=True).start()
 
@@ -316,6 +321,9 @@ class CameraProcess:
                 self.opened, self.index = True, msg[1]
                 if getattr(self, "_auto", False):
                     self._send(("auto", True))
+            elif msg[0] in ("signal", "error"):
+                if self.on_signal:
+                    self.on_signal(msg)
             elif msg[0] == "fatal":
                 print("[camera]", msg[1])
             elif msg[0] == "utterance" and len(msg) > 7 and msg[7] == "auto":
@@ -327,7 +335,7 @@ class CameraProcess:
     @staticmethod
     def _utt(msg):
         return {"rois": msg[1], "n_face": msg[2], "n_total": msg[3], "duration": msg[4], "error": msg[5], "t_crop": msg[6] if len(msg) > 6 else 0.0,
-                "expression": msg[8] if len(msg) > 8 else None}
+                "expression": msg[8] if len(msg) > 8 else None, "nonverbal": msg[9] if len(msg) > 9 else None}
 
     def set_auto(self, on):
         self._auto = bool(on)
