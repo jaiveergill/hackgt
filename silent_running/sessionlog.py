@@ -10,11 +10,10 @@ LOG_DIR = os.path.join(ROOT, "logs")
 _lock = threading.Lock()
 _fh = None
 _t0 = None
-path = None
 
 
 def start(**fields):
-    global _fh, _t0, path
+    global _fh, _t0
     os.makedirs(LOG_DIR, exist_ok=True)
     _t0 = time.time()
     path = os.path.join(LOG_DIR, time.strftime("session_%Y%m%d_%H%M%S.jsonl", time.localtime(_t0)))
@@ -55,10 +54,8 @@ def _jsonable(v):
 
 # fields worth keeping from each broadcast event type (everything else in the event is UI payload)
 _KEEP = {
-    "result": ("utt_id", "mode", "selected", "confidence", "margin", "n_frames", "duration", "source", "latency", "early", "in_inventory", "phrase_gap", "raw_greedy", "critical"),
-    "partial": ("utt_id", "n_frames", "t", "score_ms", "tag", "text"),
-    "refined": ("utt_id", "selected", "confidence", "changed", "error"),
-    "delivery": ("utt_id", "cached", "t_synth", "total", "model", "streamed", "text"),
+    "result": ("utt_id", "mode", "selected", "confidence", "margin", "n_frames", "duration", "source", "latency", "in_inventory", "phrase_gap", "raw_greedy", "critical", "mouth_px"),
+    "delivery": ("utt_id", "cached", "t_synth", "total", "model"),
     "alert": ("utt_id", "text", "confidence"),
     "error": ("utt_id", "message"),
     "status": ("status", "stage", "utt_id"),
@@ -79,8 +76,6 @@ def from_broadcast(msg):
         fields = {k: v for k, v in msg.items() if k != "type" and isinstance(v, (str, int, float, bool, type(None)))}
     else:
         fields = {k: msg[k] for k in keep if k in msg}
-        if t == "partial" and "top" in msg and msg["top"]:
-            fields["top"] = [[x.get("phrase"), round(x.get("prob", 0), 3)] for x in msg["top"][:3]]
         if t == "result" and "ranking" in msg and msg["ranking"]:
             fields["top"] = [[r.get("phrase"), round(r.get("final_prob", 0), 3)] for r in msg["ranking"][:3]]
     log(t, **fields)

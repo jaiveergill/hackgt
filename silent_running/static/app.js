@@ -32,8 +32,12 @@ function meta(m){
   const d=$('#dot'),t=$('#track');
   if(m.listening){d.className='dot rec';}else d.className='dot'+(m.face?' ok':'');
   if(!m.face)t.textContent='no face — look at the camera';
-  else{let q=m.face_frac<0.09?'move closer':(m.face_frac>0.3?'a bit further':'good distance');
-    t.textContent=(m.listening?`listening · ${m.n_frames} frames`:`tracking mouth · ${q}`)+` · ${(m.fps||0).toFixed(0)} fps`+(m.auto?` · motion ${m.energy.toFixed(1)}/${m.noise.toFixed(1)}`:'');}
+  else{
+    // mouth width in camera pixels vs the width the model's crop reads (camera_proc.MouthPixels): below it the crop is upsampled (blurred)
+    const low=m.mouth_px!=null&&m.mouth_px<m.mouth_px_need,q=low?'move closer / zoom in':(m.face_frac>0.3?'a bit further':'good distance');
+    t.innerHTML=esc(m.listening?`listening · ${m.n_frames} frames`:`tracking mouth · ${q}`)
+      +(m.mouth_px!=null?` · <b class="mouthpx ${low?'low':'ok'}">mouth ${m.mouth_px}/${m.mouth_px_need} px</b>`:'')
+      +esc(` · ${(m.fps||0).toFixed(0)} fps`+(m.auto?` · motion ${m.energy.toFixed(1)}/${m.noise.toFixed(1)}`:''));}
   $('#camwrap').classList.toggle('listening',!!m.listening);
   setMouthing(mouthingSig||!!m.mouth_active,false);
   showHands(m.hands);
@@ -71,7 +75,7 @@ function setState(s,extra){
 // ---------- event dispatch
 function handle(m){
   logEvent(m);
-  if(m.type==='hello'){setState(m.state.status);setWarm(m.state.warm);phrases=m.phrases;phraseTable=m.phrase_table||[];applyCtx(m.context);mode=m.state.mode;syncMode();if(m.state.expressive!=null)$('#expressive').checked=m.state.expressive;
+  if(m.type==='hello'){setState(m.state.status);setWarm(m.state.warm);phrases=m.phrases;phraseTable=m.phrase_table||[];applyCtx(m.context);mode=m.state.mode;syncMode();if(m.state.expressive!=null)$('#expressive').checked=m.state.expressive;$('#pace').checked=!!m.state.pace;
     $('#nphr').textContent=phrases.length+' phrases';$('#phrlist').innerHTML=phrases.map(p=>`<span>${esc(p)}</span>`).join('');$('#phrasedl').innerHTML=phrases.map(p=>`<option value="${esc(p)}">`).join('');buildChips();$('#log').innerHTML=LOG_EMPTY;(m.log||[]).forEach(addLog);
     if(!DEMO){if(!$('#cam').getAttribute('src'))$('#cam').src='/stream?session='+Date.now();fetch('/api/state').then(r=>r.json()).then(s=>{$('#engine').textContent=`${s.engine.model} · ${phrases.length} phrases`;});
       if($('#voice').value.startsWith('clone:'))fillBank($('#voice').value.slice(6));}}  // the voice may be listed before the phrases
@@ -89,7 +93,7 @@ function handle(m){
   else if(m.type==='log'){addLog(m.entry);}
   else if(m.type==='error'){toast(m.message);}  // a failed decode comes with its own idle status
   else if(m.type==='context'){applyCtx(m.context);}
-  else if(m.type==='state'){mode=m.state.mode;syncMode();setWarm(m.state.warm);}
+  else if(m.type==='state'){mode=m.state.mode;syncMode();setWarm(m.state.warm);$('#pace').checked=!!m.state.pace;}
   else if(m.type==='prewarmed'){$('#clonestat').textContent=`voice “${m.speaker}” ready · ${m.n} phrase variants cached`;if($('#voice').value==='clone:'+m.speaker)fillBank(m.speaker,true);}
   else if(m.type==='saved'){toast('saved '+m.file+' as "'+m.phrase+'"',true);}
 }
@@ -345,7 +349,7 @@ function speak(text,opts){if(!text)return;const sel=$('#voice').value||'';opts=o
     // the utterance's face sets the emotion whatever is said for it (lip phrase, LLM/Grok pick, a tapped candidate);
     // the mouthed word timing (rate + server retime) only fits the lip result's own phrase
     const cur=last&&opts.utt_id===last.utt_id,own=cur&&text===last.selected;
-    const ex=(opts.expression)||(cur&&last.expression)||{emotion:'neutral',intensity:0};const pace=$('#pace').checked,tm=(pace&&own&&last.timing)||{};
+    const ex=(cur&&last.expression)||{emotion:'neutral',intensity:0};const pace=$('#pace').checked,tm=(pace&&own&&last.timing)||{};
     let emo=opts.emotion||ex.emotion||'neutral',inten=opts.intensity!=null?opts.intensity:(ex.intensity||0),rate=tm.rate||1;
     if(emo==='urgent'){emo='angry';inten=0.7;rate=1.1;}
     const face=$('#expressive').checked,ov=$('#override').value;  // the server applies the face switch and a forced emotion
@@ -410,10 +414,10 @@ $('#lbltext').addEventListener('keydown',e=>{if(e.key==='Enter')sendLabel($('#lb
 // ---------- tabs / mode / settings / context
 $$('#tabs button').forEach(b=>b.onclick=()=>{$$('#tabs button').forEach(x=>x.classList.toggle('on',x===b));$$('.tab').forEach(t=>t.classList.toggle('on',t.id==='tab-'+b.dataset.tab));});
 $$('#mode button').forEach(b=>b.onclick=()=>{mode=b.dataset.mode;send({cmd:'mode',mode});syncMode();});
-$('#autospeak').onchange=e=>send({cmd:'settings',auto_speak:e.target.checked,tts:'browser'});
 $('#expressive').onchange=e=>send({cmd:'settings',expressive:e.target.checked});
 $('#llm').onchange=e=>send({cmd:'settings',llm_enabled:e.target.checked});
 $('#override').onchange=e=>send({cmd:'settings',emotion_override:e.target.value||null});
+$('#pace').onchange=e=>send({cmd:'settings',pace:e.target.checked});  // the server loads the voice aligner it needs
 $('#autolisten').onchange=e=>{send({cmd:'settings',auto_listen:e.target.checked});lb.style.opacity=e.target.checked?.45:1;lb.innerHTML=e.target.checked?'HANDS-FREE · just mouth a phrase<small>auto-detects mouth movement · or hold to force</small>':'HOLD TO LISTEN<small>or hold the space bar · hands-free available in Dev</small>';};
 let ctxT;function pushCtx(){clearTimeout(ctxT);ctxT=setTimeout(()=>send({cmd:'context',notes:$('#notes').value,category:$('#category').value,last_prompt:$('#prompt').value}),250)}
 ['#notes','#prompt'].forEach(s=>$(s).addEventListener('input',pushCtx));$('#category').addEventListener('change',()=>{curCategory=$('#category').value;$$('#chips button').forEach(x=>x.classList.toggle('on',x.textContent===curCategory));pushCtx();});

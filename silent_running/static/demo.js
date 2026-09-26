@@ -69,7 +69,7 @@ function draw(){
 }
 requestAnimationFrame(draw);
 setInterval(()=>{const [a,b,c,d]=cv.mouthBox||[0,0,0,0];
-  meta({face:true,fps:30,frame_w:W,frame_h:H,bbox:[a,b,c,d],source:{kind:'demo',mirror:false},face_frac:.16,listening:F.listening,n_frames:F.listening?Math.round((performance.now()/1000-F.listenT)*25):0,
+  meta({face:true,fps:30,frame_w:W,frame_h:H,bbox:[a,b,c,d],source:{kind:'demo',mirror:false},face_frac:.16,mouth_px:58,mouth_px_need:45,listening:F.listening,n_frames:F.listening?Math.round((performance.now()/1000-F.listenT)*25):0,
         auto:false,mouth_active:F.talk,hands:'on',expression:{angry:0,warm:F.grimace?0:.1,sad:F.grimace*.7}});},100);
 
 // ---------------------------------------------------------------- event helpers
