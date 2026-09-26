@@ -18,6 +18,7 @@ const V=Date.now();document.write(`<link rel="stylesheet" href="/static/app.css?
   <div class="brand"><span class="mark"></span><h1>Silent <b>Running</b></h1></div>
   <div class="sub">ICU silent-speech communicator · <span id="engine" class="mono"></span></div>
   <div class="spacer"></div>
+  <div class="warmup" id="warmup" hidden title="The voice-timing model is still loading; decodes can take several seconds until it finishes">warming up · first reads are slower</div>
   <div class="statuspill idle" id="statuspill"><i></i><span>idle</span></div>
   <div class="toggle tabs" id="tabs"><button data-tab="patient" class="on">Patient</button><button data-tab="dev">Dev</button></div>
   <div class="toggle" id="mode"><button data-mode="phrase" class="on">Phrase</button><button data-mode="open">Open</button></div>
