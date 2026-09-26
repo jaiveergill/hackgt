@@ -122,6 +122,14 @@ class VSREngine:
                 torch.mps.synchronize()
         return enc
 
+    def internal_lm(self, phrases, frames=60):
+        """Log-likelihood the attention decoder gives each phrase with no visual evidence (an all-zero encoder output): its
+        internal language model, learned from TED transcripts. It is why "I don't know", "Thank you", "Sorry" and "Okay"
+        win whenever the lips are ambiguous. It depends on the phrase only (rank correlation 1.0 between 30 and 90 null
+        frames), so it is computed once per inventory."""
+        null = torch.zeros(frames, self.model.adim)
+        return {r["phrase"]: r["att"] for r in self._score_phrases_full(null, list(phrases))}
+
     def warmup(self, phrases=(), n_frames=50):
         """Run the live path's kernels once. On the GPU, every new shape of a phrase-scoring call builds and compiles its
         kernels (0.1-0.7 s once, measured); _score_phrases_full pads its calls to a few shapes, and these run here for
