@@ -63,7 +63,7 @@ def speak_backend(text):
 
 
 # ----------------------------------------------------------------------------- decoding pipeline
-def run_decode(rois, n_face, n_total, duration, source="webcam", label=None, t_crop=0.0, expression=None):
+def run_decode(rois, n_face, n_total, duration, source="webcam", label=None, t_crop=0.0, expression=None, nonverbal=None):
     """Full pipeline on an utterance's mouth crops. Emits incremental events so the UI can show progress."""
     with work_lock:
         STATE["utt_id"] += 1
@@ -85,7 +85,7 @@ def run_decode(rois, n_face, n_total, duration, source="webcam", label=None, t_c
         broadcast({"type": "raw", "utt_id": uid, "stage": "greedy", "text": greedy, "n_frames": int(x.shape[1]), "duration": duration,
                    "latency": {"crop": t1 - t0, "encode": t2 - t1, "greedy": t3 - t2}})
         result = {"utt_id": uid, "mode": STATE["mode"], "raw_greedy": greedy, "n_frames": int(x.shape[1]), "duration": duration, "source": source, "label": label,
-                  "expression": expression or {"emotion": "neutral", "intensity": 0.0}}
+                  "expression": expression or {"emotion": "neutral", "intensity": 0.0}, "nonverbal": nonverbal}
         LAST["enc"] = enc; LAST["utt_id"] = uid
         if not greedy.strip():
             # CTC saw no speech-like mouth movement at all. The attention decoder would hallucinate fluent text here.
@@ -470,13 +470,21 @@ def _on_auto_utterance(u):
     threading.Thread(target=_decode_utterance, args=(u, "webcam-auto"), daemon=True).start()
 
 
+def _on_camera_signal(msg):
+    if msg[0] == "error":
+        print("[camera]", msg[1])
+        broadcast({"type": "error", "message": msg[1]})
+    else:
+        broadcast({"type": "signal", **msg[1]})
+
+
 def _decode_utterance(u, source="webcam"):
     if u["rois"] is None:
         set_status("idle")
         msgs = {"too short": "Utterance too short. Hold Listen while you mouth the phrase.", "face not tracked": f"Face not tracked well enough ({u['n_face']}/{u['n_total']} frames). Face the camera and try again."}
         broadcast({"type": "error", "message": msgs.get(u["error"], u["error"] or "capture failed")})
         return
-    run_decode(u["rois"], u["n_face"], u["n_total"], u["duration"], source=source, t_crop=u["t_crop"], expression=u.get("expression"))
+    run_decode(u["rois"], u["n_face"], u["n_total"], u["duration"], source=source, t_crop=u["t_crop"], expression=u.get("expression"), nonverbal=u.get("nonverbal"))
 
 
 def _save_sample(phrase, speaker):
@@ -550,6 +558,7 @@ def main():
     if not args.no_camera:
         camera = CameraProcess(index=args.camera)
         camera.on_auto_utterance = _on_auto_utterance
+        camera.on_signal = _on_camera_signal
         for _ in range(400):  # child imports torch/mediapipe first (~10-20 s)
             if camera.opened: break
             time.sleep(0.1)
