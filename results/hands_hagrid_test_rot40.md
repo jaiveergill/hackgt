@@ -2,23 +2,33 @@
 
 `python scripts/eval_hands.py --split test --rotate 40`
 
-split=test view=crop 3.0x hand box rotate 40 deg, roll from face True (no face found in 112 photos) landmarker latency median 24.2 ms/image
+split=test view=full photo (live path), rotated 40 deg; landmarker median 25.5 ms/photo
 
-| class | expected | n | hand found | correct | accuracy | errors |
-|---|---|---|---|---|---|---|
-| fist | fingers:0 | 24 | 22 | 19 | 79% | thumb:up x2, no hand x2, fingers:1 x1 |
-| one | fingers:1 | 18 | 18 | 14 | 78% | point:right x2, fingers:2 x1, fingers:0 x1 |
-| peace | fingers:2 | 19 | 17 | 16 | 84% | no hand x2, fingers:3 x1 |
-| two_up | fingers:2 | 23 | 20 | 19 | 83% | no hand x3, fingers:3 x1 |
-| peace_inverted | fingers:2 | 18 | 17 | 17 | 94% | no hand x1 |
-| call | fingers:2 | 21 | 21 | 17 | 81% | fingers:4 x2, fingers:3 x1, thumb:up x1 |
-| three | fingers:3 | 22 | 18 | 14 | 64% | no hand x4, fingers:4 x3, fingers:2 x1 |
-| three2 | fingers:3 | 17 | 16 | 16 | 94% | no hand x1 |
-| four | fingers:4 | 21 | 19 | 17 | 81% | no hand x2, fingers:5 x2 |
-| palm | fingers:5 | 17 | 17 | 17 | 100% |  |
-| stop | fingers:5 | 12 | 11 | 9 | 75% | fingers:4 x2, no hand x1 |
-| like | thumb:up | 26 | 19 | 11 | 42% | no hand x7, fingers:1 x5, fingers:2 x2 |
-| dislike | thumb:down | 17 | 17 | 9 | 53% | fingers:1 x8 |
-| **all** | | 255 | 232 | 195 | **76.5%** | |
+| class | expected | n | correct | accuracy | errors |
+|---|---|---|---|---|---|
+| fist | none | 24 | 24 | 100% |  |
+| one | fingers:1 | 18 | 9 | 50% | point:right x3, none x3, fingers:2 x3 |
+| peace | fingers:2 | 19 | 13 | 68% | none x4, fingers:3 x1, fingers:6 x1 |
+| two_up | fingers:2 | 23 | 19 | 83% | none x3, fingers:3 x1 |
+| peace_inverted | fingers:2 | 18 | 16 | 89% | none x1, fingers:3 x1 |
+| call | fingers:2 | 21 | 14 | 67% | none x3, fingers:3 x2, fingers:4 x1 |
+| three | fingers:3 | 22 | 13 | 59% | none x6, fingers:5 x1, fingers:4 x1 |
+| three2 | fingers:3 | 17 | 16 | 94% | none x1 |
+| four | fingers:4 | 21 | 15 | 71% | none x4, fingers:5 x1, fingers:3 x1 |
+| palm | fingers:5 | 17 | 13 | 76% | none x4 |
+| stop | fingers:5 | 12 | 7 | 58% | none x3, fingers:4 x2 |
+| like | thumb:up | 26 | 5 | 19% | none x19, fingers:6 x1, fingers:2 x1 |
+| dislike | thumb:down | 17 | 1 | 6% | none x16 |
+| **all** | | 255 | 165 | **64.7%** | |
 
-confidence >= 0.5: 90.1% correct of 192 found hands  confidence < 0.5: 55.0% correct of 40 found hands
+| label confidence | labels reported | correct |
+|---|---|---|
+| 0.00-0.25 | 17 | 29.4% |
+| 0.25-0.50 | 12 | 58.3% |
+| 0.50-0.75 | 48 | 93.8% |
+| 0.75-1.00 | 87 | 96.6% |
+| **>= 0.25** | 147 (58% of photos) | **92.5%** |
+| **>= 0.5** | 135 (53% of photos) | **95.6%** |
+| **>= 0.75** | 87 (34% of photos) | **96.6%** |
+
+harmful errors: false thumb:up (a "yes") on 0 photos, false thumb:down (a "no") on 0; fist -> thumb:up 0/24, fist -> any label 0/24
