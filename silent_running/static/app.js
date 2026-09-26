@@ -202,6 +202,8 @@ function onConfirm(c){
     else $('#confirmhint').textContent=`✗ Not “${c.candidate}” · trying the next guess`;
   }else if(c.state==='confirmed'){
     stopCountdown();cf=null;heroSet('confirmed');setBig(c.candidate);setRing(1);
+    // the reason, alternatives and evidence chips described the guess being asked about, not the confirmed phrase
+    $('#reason').textContent='';$('#alts').innerHTML='';$('#conf').innerHTML='';
     $('#eyebrow').textContent=`Confirmed by ${c.by==='nurse'?'the nurse':`the patient (${c.by})`} ✓${c.latency?` · answered in ${c.latency.answer.toFixed(1)} s`:''}`;
     spoken[c.utt_id]=c.candidate;  // said here; say is null for a critical phrase, which its alert announces
     if(c.say&&$('#autospeak').checked)sayConfirm(c,{onstart:()=>latMark(c.utt_id,'audio')});

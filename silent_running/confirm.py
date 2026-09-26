@@ -48,7 +48,9 @@ def plan(result):
         action, reason = "speak", f"confidence {conf:.0%}" + (" (critical: escalated)" if result.get("critical") else "")
     elif alts:
         action = "confirm"
-        reason = f"confidence {conf:.0%} < {SPEAK_CONF:.0%}" if conf < SPEAK_CONF else "weak match: free transcript fits better than any phrase"
+        # one decimal: whole percents print 0.598 against 0.60 as "60% < 60%"
+        reason = (f"confidence {conf * 100:.1f}%, below the {SPEAK_CONF:.0%} needed to speak without asking" if conf < SPEAK_CONF
+                  else "weak match: free transcript fits better than any phrase")
     else:
         action, reason = "none", "no candidate"
     return {"type": "decision", "utt_id": result["utt_id"], "text": result["selected"], "confidence": round(conf, 3),
