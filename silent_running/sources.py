@@ -7,6 +7,7 @@ Spec strings (server `--source`):
   usb               first USB (UVC) camera per system_profiler (never the FaceTime or an iPhone Continuity Camera)
   usb:1 | usb:Arducam   by index or by (substring of) the AVFoundation device name; preview not mirrored
   file:data/eval/x.mp4[?loop=0&realtime=0&gap=0]   plays at native fps, loops by default (judging backup); see FileSource
+  stream:http://172.20.10.2:81/stream   MJPEG over HTTP (ESP32-CAM on the glasses); stream:172.20.10.2 = that host's :81/stream
 """
 import json, math, os, re, sys, time, subprocess
 
@@ -253,6 +254,98 @@ class FileSource(VideoSource):
                 "realtime": self.realtime, "loop": self.loop, "t_play": round(self._t0, 3)}  # time of frame 0 of this play
 
 
+class StreamSource(VideoSource):
+    """MJPEG-over-HTTP camera (ESP32-CAM `/stream`). Parses the multipart stream itself (no ffmpeg buffering) in a reader
+    thread that keeps only the newest frame, so a slow consumer never accumulates lag. Reconnects when the stream stalls.
+    Frames are stamped at arrival time. The head camera looks at the patient, so the preview is not mirrored."""
+    kind = "stream"
+    mirror = False
+
+    def __init__(self, url, timeout=5.0):
+        if not url.startswith("http"):
+            url = f"http://{url}:81/stream"
+        self.url, self.timeout = url, timeout
+        self._frame, self._ts, self._seq, self._got = None, 0.0, 0, 0
+        self._stop, self._thread, self._err = False, None, None
+        self.width = self.height = 0
+        self.fps_est = 0.0
+
+    def open(self):
+        import urllib.request
+        self._stop = False
+        req = urllib.request.Request(self.url, headers={"User-Agent": "silent-running"})
+        try:
+            resp = urllib.request.urlopen(req, timeout=self.timeout)
+        except Exception as e:
+            raise RuntimeError(f"cannot open MJPEG stream {self.url}: {e}")
+        ctype = resp.headers.get("Content-Type", "")
+        if "multipart" not in ctype:
+            raise RuntimeError(f"{self.url} is not an MJPEG stream (Content-Type {ctype!r})")
+        import threading
+        self._thread = threading.Thread(target=self._reader, args=(resp,), daemon=True)
+        self._thread.start()
+        t0 = time.time()
+        while self._frame is None and time.time() - t0 < self.timeout:
+            if self._err: raise RuntimeError(self._err)
+            time.sleep(0.02)
+        if self._frame is None:
+            raise RuntimeError(f"no frame from {self.url} within {self.timeout}s")
+        print(f"[source] stream {self.url} {self.width}x{self.height}")
+
+    def _reader(self, resp):
+        import cv2, numpy as np
+        buf = bytearray(); t_last, n = time.time(), 0
+        try:
+            while not self._stop:
+                chunk = resp.read1(65536)   # whatever is available now; read(n) would block until n bytes = ~2 frames
+                if not chunk:
+                    self._err = "stream ended"; break
+                buf += chunk
+                while True:  # extract every complete JPEG (SOI..EOI); keep only the last one
+                    a = buf.find(b"\xff\xd8")
+                    if a < 0:
+                        del buf[:]; break
+                    b = buf.find(b"\xff\xd9", a + 2)
+                    if b < 0:
+                        if a > 0: del buf[:a]
+                        break
+                    jpg = bytes(buf[a:b + 2]); del buf[:b + 2]
+                    img = cv2.imdecode(np.frombuffer(jpg, np.uint8), cv2.IMREAD_COLOR)
+                    if img is not None:
+                        self._frame, self._ts, self._seq = img, time.time(), self._seq + 1
+                        self.height, self.width = img.shape[:2]
+                        n += 1
+                        if self._ts - t_last >= 2.0:
+                            self.fps_est, t_last, n = n / (self._ts - t_last), self._ts, 0
+        except Exception as e:
+            self._err = f"stream read failed: {e}"
+        finally:
+            try: resp.close()
+            except Exception: pass
+
+    def read(self):
+        t0 = time.time()
+        while self._seq == self._got and time.time() - t0 < 1.0:  # wait for a new frame (like a blocking camera read)
+            if self._err and self._thread and not self._thread.is_alive():
+                return False, None, None
+            time.sleep(0.003)
+        if self._seq == self._got:
+            return False, None, None
+        self._got = self._seq
+        return True, self._frame, self._ts
+
+    def release(self):
+        self._stop = True
+
+    def reopen(self):
+        self.release()
+        self._frame, self._err, self._seq, self._got = None, None, 0, 0
+        self.open()
+
+    def info(self):
+        return {**super().info(), "url": self.url, "fps": round(self.fps_est, 1), "width": self.width, "height": self.height}
+
+
 def _flag(v):
     return str(v).lower() not in ("0", "false", "no", "off")
 
@@ -268,12 +361,14 @@ def make_source(spec, width=640, height=480, face_fn=None):
         return CameraSource(index=int(arg) if arg else -1, width=width, height=height, face_fn=face_fn)
     if kind == "usb":
         return USBSource(which=arg or None, width=width, height=height)
+    if kind == "stream":
+        return StreamSource(arg)
     if kind == "file":
         path, _, query = arg.partition("?")
         opts = dict(kv.split("=", 1) for kv in query.split("&") if "=" in kv)
         return FileSource(path, realtime=_flag(opts.get("realtime", 1)), loop=_flag(opts.get("loop", 1)),
                           loop_gap=float(opts.get("gap", 0)))
-    raise ValueError(f"unknown video source {spec!r}; use webcam[:N] | usb[:N|name] | file:path.mp4")
+    raise ValueError(f"unknown video source {spec!r}; use webcam[:N] | usb[:N|name] | file:path.mp4 | stream:http://host:81/stream")
 
 
 if __name__ == "__main__":  # quick check: python -m silent_running.sources file:data/samples/ted1_short.mp4
