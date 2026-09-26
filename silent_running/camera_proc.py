@@ -9,7 +9,13 @@ import threading, queue, time, collections, os, sys
 import numpy as np
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(ROOT, "third_party", "chaplin"))
+from pipelines.detectors.mediapipe.video_process import VideoProcess, cut_patch, linear_interpolate  # noqa: E402  (cv2/skimage, no torch)
 MODEL_FPS = 25.0
+# Hands-free listening ends an utterance once the mouth has been still this long (s). scripts/eval_hang.py: 400 MIRACL phrases
+# and 60 s of TED speech have no pause the motion detector sees as still for 0.15 s, 0.35 s keeps a phrase whole across a
+# frozen mouth of up to ~0.6 s, and it ends utterances 0.28 s sooner than 0.6 s (median). Silent mouthing is not measured yet.
+AUTO_HANG = float(os.environ.get("SR_AUTO_HANG", "0.35"))
 
 
 def resample_25fps(items):
@@ -24,6 +30,103 @@ def resample_25fps(items):
     frames = np.stack([items[i][1] for i in idx])
     lms = [items[i][2] for i in idx]
     return frames, lms, float(duration)
+
+
+class IncrementalCropper:
+    """The mouth crops of one utterance, computed while it is mouthed instead of in one batch after it ends.
+
+    The model gets the frames of [start, end] resampled to 25 fps (resample_25fps) and cropped by VideoProcess. Doing that
+    after the end cost 11-19 ms on the latency path; this computes the same crops pixel for pixel (scripts/check_cropper.py)
+    as frames arrive. A 25 fps slot, its interpolated landmarks and its crop (whose landmark smoothing reads +-6 slots) are
+    computed only once nothing that can still arrive changes them: advance(safe) is given a time the utterance cannot end
+    before, finish(end) crops the rest. A frame is released once cropped, so memory stays bounded; a backlog of more than
+    `max_backlog` uncropped slots (no face for that long) fails the utterance instead of growing."""
+
+    def __init__(self, vp, start, max_backlog):
+        self.vp, self.start, self.max_backlog = vp, start, max_backlog
+        self.half = vp.window_margin // 2
+        self.ts = []            # time of every frame fed: the "too short" count, the duration and the slot clock
+        self.items = []         # (ts, rgb, lm) not assigned to a slot yet, and the one before them
+        self.rgb, self.det, self.lm = [], [], []  # per slot: frame (None once cropped), detected landmarks, interpolated landmarks
+        self.last_det = None    # last slot with detected landmarks
+        self.rois, self.error = [], None
+
+    def feed(self, ts, rgb, lm):
+        if ts >= self.start:
+            self.ts.append(ts); self.items.append((ts, rgb, lm))
+
+    def advance(self, safe):
+        if not self.ts:
+            return
+        try:
+            self._assign(safe)
+            if self.error is None:
+                self._crop(len(self.det), final=False)
+                if len(self.det) - len(self.rois) > self.max_backlog:
+                    raise RuntimeError(f"no face in the last {len(self.det) - len(self.rois)} frames")
+        except Exception as e:  # cut_patch's "too much bias", or a bug: finish() reports it, as emit() did for the batch crop
+            self._fail(e)
+
+    def finish(self, end):
+        """-> (rois, n_face, n_total, duration, error) for the frames in [start, end], with emit()'s values for each error."""
+        ts = [t for t in self.ts if t <= end]
+        if len(ts) < 8:
+            return None, 0, len(ts), 0.0, "too short"
+        dur = ts[-1] - ts[0]
+        n = max(int(round(dur * MODEL_FPS)) + 1, 1)
+        try:
+            self.items = [it for it in self.items if it[0] <= end]
+            self._assign(ts[-1], n)
+            n_face = sum(d is not None for d in self.det)
+            if n_face < max(4, n // 4):
+                return None, n_face, n, dur, "face not tracked"
+            if self.error is None:
+                self.lm[self.last_det + 1:] = [self.lm[self.last_det]] * (n - 1 - self.last_det)  # trailing slots without a face
+                self._crop(n, final=True)
+        except Exception as e:
+            self._fail(e)
+        if self.error is not None:
+            return None, sum(d is not None for d in self.det), n, dur, f"crop failed: {self.error}"
+        return np.array(self.rois), n_face, n, dur, None
+
+    def _fail(self, e):
+        self.error = e
+        self.rgb = [None] * len(self.rgb)  # nothing more is cropped: release the frames
+
+    def _assign(self, upto, n=None):
+        """Slot k gets the frame nearest t0 + k/25, the later one on a tie (resample_25fps). While streaming (n is None) a slot
+        is assigned once the first frame at or after its time has arrived, at or before `upto`; finish() assigns all n."""
+        t0, items = self.ts[0], self.items
+        while n is None or len(self.det) < n:
+            target = t0 + len(self.det) / MODEL_FPS
+            j = next((q for q, it in enumerate(items) if it[0] >= target), None)
+            if n is None and (j is None or items[j][0] > upto):
+                return
+            if j is None:
+                j = len(items) - 1
+            i = j - 1 if j > 0 and abs(items[j - 1][0] - target) < abs(items[j][0] - target) else j
+            _, rgb, lm = items[i]
+            del items[:max(j - 1, 0)]  # the next slot's candidates are items[j - 1:]
+            k = len(self.det)
+            self.rgb.append(rgb if self.error is None else None); self.det.append(lm); self.lm.append(lm)
+            if lm is not None:  # interpolate the slots since the last detection, as VideoProcess.interpolate_landmarks
+                if self.last_det is None:
+                    self.lm[:k] = [lm] * k
+                elif k - self.last_det > 1:
+                    linear_interpolate(self.lm, self.last_det, k)
+                self.last_det = k
+
+    def _crop(self, n, final):
+        """Crop the next slots (VideoProcess.crop_patch) while their landmark window is final."""
+        vp = self.vp
+        while len(self.rois) < n and (final or (self.last_det is not None and len(self.rois) + self.half <= self.last_det)):
+            i = len(self.rois)
+            w = min(self.half, i, n - 1 - i)
+            smoothed = np.mean([self.lm[x] for x in range(i - w, i + w + 1)], axis=0)
+            smoothed += self.lm[i].mean(axis=0) - smoothed.mean(axis=0)
+            frame, lms = vp.affine_transform(self.rgb[i], smoothed, vp.reference, grayscale=vp.convert_gray)
+            self.rois.append(cut_patch(frame, lms[vp.start_idx:vp.stop_idx], vp.crop_height // 2, vp.crop_width // 2))
+            self.rgb[i] = None
 
 
 class _MPDetector:
@@ -95,8 +198,7 @@ class _Outbox:
 
 def _worker(conn, spec, width, height, preview_width, buffer_seconds):
     import cv2
-    sys.path.insert(0, ROOT); sys.path.insert(0, os.path.join(ROOT, "third_party", "chaplin"))
-    from pipelines.detectors.mediapipe.video_process import VideoProcess  # cv2/skimage only, no torch
+    sys.path.insert(0, ROOT)
     from silent_running.expression import FaceLandmarker, ExpressionTracker
     from silent_running.sources import make_source
     from silent_running.signals.aggregate import Signals
@@ -133,23 +235,24 @@ def _worker(conn, spec, width, height, preview_width, buffer_seconds):
     quiet_since = None      # time motion dropped below the offset threshold while active
     auto_start = None       # utterance start time (with pre-roll)
     AUTO_ON, AUTO_OFF = 2.6, 1.6      # multiples of the noise floor
-    MIN_ACTIVE, HANG, MIN_UTT, MAX_UTT, PRE_ROLL, POST_ROLL = 0.20, 0.60, 0.5, 6.0, 0.30, 0.15
+    MIN_ACTIVE, HANG, MIN_UTT, MAX_UTT, PRE_ROLL, POST_ROLL = 0.20, AUTO_HANG, 0.5, 6.0, 0.30, 0.15
+    cropper = None          # IncrementalCropper of the utterance being captured (manual or auto)
+
+    def begin(start):
+        nonlocal cropper
+        cropper = IncrementalCropper(vp, start, max_backlog=buffer.maxlen)  # no more frames than the capture buffer holds
+        for it in buffer:
+            cropper.feed(*it)
 
     def emit(start, end, tag):
+        nonlocal cropper
         expression = expr.finish()
-        items = [it for it in buffer if it[0] >= start and it[0] <= end]
-        if len(items) < 8:
-            out.send(("utterance", None, 0, len(items), 0.0, "too short", 0.0, tag)); return
-        frames, lms, dur = resample_25fps(items)
-        n_face = sum(l is not None for l in lms)
-        if n_face < max(4, len(lms) // 4):
-            out.send(("utterance", None, n_face, len(lms), dur, "face not tracked", 0.0, tag)); return
-        try:
-            t0 = time.time()
-            rois = vp(frames, list(lms))
-            out.send(("utterance", rois, n_face, len(lms), dur, None, time.time() - t0, tag, expression, signals.summary(start, end, expression)))
-        except Exception as e:
-            out.send(("utterance", None, n_face, len(lms), dur, f"crop failed: {e}", 0.0, tag))
+        c, cropper = cropper, None
+        t0 = time.time()
+        rois, n_face, n_total, dur, err = c.finish(end)
+        if err:
+            out.send(("utterance", None, n_face, n_total, dur, err, 0.0, tag)); return
+        out.send(("utterance", rois, n_face, n_total, dur, None, time.time() - t0, tag, expression, signals.summary(start, end, expression)))
 
     while True:
       try:
@@ -158,8 +261,9 @@ def _worker(conn, spec, width, height, preview_width, buffer_seconds):
         # commands
         while conn.poll():
             cmd = conn.recv()
-            if cmd[0] == "start":
-                listen_start = time.time(); expr.start()
+            if cmd[0] == "start":  # a manual listen takes over an auto utterance in progress (it was decoded twice)
+                listen_start = time.time(); expr.start(); begin(listen_start)
+                active_since = quiet_since = auto_start = None
             elif cmd[0] == "stop":
                 start, listen_start = listen_start, None
                 if start is None:
@@ -167,6 +271,8 @@ def _worker(conn, spec, width, height, preview_width, buffer_seconds):
                 emit(start, time.time(), "manual")
             elif cmd[0] == "auto":
                 auto = bool(cmd[1]); active_since = quiet_since = auto_start = None
+                if listen_start is None:
+                    cropper = None
             elif cmd[0] == "snapshot":
                 now = time.time()
                 items = [it for it in buffer if it[0] >= now - cmd[1]]
@@ -204,6 +310,8 @@ def _worker(conn, spec, width, height, preview_width, buffer_seconds):
         except Exception as e:
             print("[camera] detect failed:", e); lm, bs = None, None
         buffer.append((ts, rgb, lm))
+        if cropper is not None:
+            cropper.feed(ts, rgb, lm)
         expr.update(bs, listen_start is not None or auto_start is not None)
         signals.update(rgb, ts)
         # ---- mouth-motion energy (translation-compensated: patch is re-centred on the mouth every frame)
@@ -231,7 +339,7 @@ def _worker(conn, spec, width, height, preview_width, buffer_seconds):
                 if energy > on_thr:
                     active_since = active_since or ts
                     if ts - active_since >= MIN_ACTIVE:
-                        auto_start = active_since - PRE_ROLL; quiet_since = None; expr.start()
+                        auto_start = active_since - PRE_ROLL; quiet_since = None; expr.start(); begin(auto_start)
                 else:
                     active_since = None
             else:
@@ -244,7 +352,9 @@ def _worker(conn, spec, width, height, preview_width, buffer_seconds):
                     end = (quiet_since or ts) + POST_ROLL
                     if end - auto_start - PRE_ROLL >= MIN_UTT:
                         emit(auto_start, min(end, ts), "auto")
-                    auto_start = active_since = quiet_since = None
+                    cropper = auto_start = active_since = quiet_since = None
+        if cropper is not None:  # the utterance cannot end before `safe`: crop what that makes final
+            cropper.advance(ts if listen_start is not None or quiet_since is None else min(quiet_since + POST_ROLL, ts))
         fps_n += 1
         if ts - fps_t >= 1.0:
             fps, fps_t, fps_n = fps_n / (ts - fps_t), ts, 0
