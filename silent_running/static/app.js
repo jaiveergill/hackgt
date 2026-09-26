@@ -55,13 +55,16 @@ function drawOverlay(m){
 
 // ---------- status
 let heroBefore={state:'idle',eyebrow:''};  // restored when processing ends without anything replacing the hero (a quiet answer, an error)
+let enrolling=false;  // the hero shows the enrollment prompt; cleared when the session ends
 function setState(s,extra){
+  if(enrolling&&s!=='enrolling'){enrolling=false;heroIdle('Hold Listen and mouth a phrase','Waiting for the patient');}
   const el=$('#state');el.className='state '+s;el.textContent=(s==='nurse_listening'?'nurse speaking':s)+(extra?' · '+extra:'');
   const p=$('#statuspill');p.className='statuspill '+s;p.querySelector('span').textContent=s==='nurse_listening'?'nurse speaking':s;
   const h=$('#hero');
   if(s==='listening'&&h.dataset.state!=='confirm'){$('#eyebrow').textContent='Listening · mouth the phrase';}
   else if(s==='processing'){if(h.dataset.state!=='processing')heroBefore={state:h.dataset.state,eyebrow:$('#eyebrow').textContent};h.dataset.state='processing';$('#eyebrow').textContent='Reading lips…';}
   else if(s==='idle'&&h.dataset.state==='processing'){h.dataset.state=heroBefore.state;$('#eyebrow').textContent=heroBefore.eyebrow;}
+  else if(s==='enrolling'&&extra){enrolling=true;heroIdle(extra,'Enrolling this patient · hold Listen, mouth the phrase, release');}  // the prompt must be readable at the bedside
 }
 
 // ---------- event dispatch
