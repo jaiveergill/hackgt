@@ -4,11 +4,11 @@ on the glasses clip and a recorded file all drive the exact same live pipeline (
 Spec strings (server `--source`):
   webcam            auto: probe indices 0-2, prefer the one that sees a face
   webcam:1          OpenCV camera index 1 (preview is mirrored, selfie-style)
-  usb               first external camera (skips FaceTime / iPhone / Desk View / screen capture)
+  usb               first USB (UVC) camera per system_profiler (never the FaceTime or an iPhone Continuity Camera)
   usb:1 | usb:Arducam   by index or by (substring of) the AVFoundation device name; preview not mirrored
   file:data/eval/x.mp4[?loop=0&realtime=0&gap=0]   plays at native fps, loops by default (judging backup); see FileSource
 """
-import math, os, re, sys, time, subprocess
+import json, math, os, re, sys, time, subprocess
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -30,6 +30,11 @@ class VideoSource:
 
     def release(self):
         pass
+
+    def reopen(self):
+        """Reopen after the source stopped delivering frames (e.g. a camera unplugged and plugged back in)."""
+        self.release()
+        self.open()
 
     def info(self):
         return {"kind": self.kind, "mirror": self.mirror, "finished": self.finished}
@@ -91,19 +96,35 @@ class CameraSource(VideoSource):
         self.cap = best
 
     def read(self):
+        if self.cap is None:  # released, or a reopen after an unplug failed: no frame yet
+            return False, None, time.time()
         ok, bgr = self.cap.read()
         return ok, bgr, time.time()
+
+    def reopen(self):
+        """Reopen the same device after it stopped delivering frames (unplug/replug)."""
+        self.release()
+        CameraSource.open(self)
 
     def release(self):
         if self.cap is not None:
             self.cap.release()
+            self.cap = None
 
     def info(self):
         return {**super().info(), "index": self.index}
 
 
-# AVFoundation devices that are not a USB camera on the glasses
-_BUILTIN = re.compile(r"facetime|iphone|desk view|capture screen|continuity|obs virtual", re.I)
+def uvc_camera_names():
+    """Names of USB Video Class cameras, from `system_profiler SPCameraDataType` (macOS). Classifying by hardware type,
+    not by name, matters: a Continuity Camera is named after the phone (e.g. "Hriday's Phone Camera"), so a name
+    blacklist lets `usb` pick the iPhone. UVC devices report a model id like "UVC Camera VendorID_1133 ProductID_2085"; Apple's own (vendor 1452) are excluded."""
+    r = subprocess.run(["system_profiler", "SPCameraDataType", "-json"], capture_output=True, text=True, timeout=15)
+    if r.returncode != 0:
+        raise RuntimeError(f"system_profiler failed ({r.returncode}): {r.stderr.strip()}")
+    models = {c["_name"]: c.get("spcamera_model-id", "") for c in json.loads(r.stdout).get("SPCameraDataType", [])}
+    # Intel-Mac FaceTime cameras are UVC too, with Apple's vendor id 1452 (0x05AC)
+    return {name for name, model in models.items() if model.startswith("UVC Camera") and "VendorID_1452 " not in model + " "}
 
 
 def list_devices():
@@ -134,14 +155,15 @@ class USBSource(CameraSource):
 
     def open(self):
         devs = [d for d in list_devices() if not d[1].lower().startswith("capture screen")]
-        if self.which is None:
-            ext = [d for d in devs if not _BUILTIN.search(d[1])]
-            if not ext:
-                raise RuntimeError(f"no external camera found (devices: {devs})")
-            self.index, self.name = ext[0]
-        elif str(self.which).isdigit():
+        if str(self.which).isdigit():
             self.index = int(self.which)
             self.name = dict(devs).get(self.index)
+        elif self.which is None:
+            uvc = uvc_camera_names()
+            ext = [d for d in devs if d[1] in uvc]
+            if not ext:
+                raise RuntimeError(f"no USB (UVC) camera found; devices: {devs}; UVC cameras per system_profiler: {sorted(uvc)}")
+            self.index, self.name = ext[0]
         else:
             hit = [d for d in devs if self.which.lower() in d[1].lower()]
             if not hit:
