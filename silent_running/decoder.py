@@ -25,7 +25,7 @@ class PhraseDecoder:
         rows = []
         for r, vp in zip(vsr, vsr_probs):
             pr = prior[r["phrase"]]
-            rows.append({"phrase": r["phrase"], "vsr_score": r["score"], "att": r["att"], "ctc": r["ctc"],
+            rows.append({"phrase": r["phrase"], "vsr_score": r["score"], "att": r["att"], "ctc": r["ctc"], "proto": r["proto"],
                          "vsr_prob": vp, "prior": pr["prior"], "reasons": pr["reasons"],
                          "final_score": r["score"] + self.gamma * pr["prior"]})
         fp = softmax([r["final_score"] for r in rows], self.temp)

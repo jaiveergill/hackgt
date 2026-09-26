@@ -75,6 +75,7 @@ class VSREngine:
         self.video_transform = VideoTransform(speed_rate=1)
         self.load_time = time.time() - t0
         self.mps_lock = threading.Lock()  # MPS is not safe to use from two threads at once (Metal command buffer assertion)
+        self.profile = None  # active enroll.Profile (patient enrollment); None = generic model
 
     # ------------------------------------------------------------------ preprocessing
     def landmarks_for_frames(self, frames_rgb):
@@ -164,20 +165,24 @@ class VSREngine:
         Same weighting the beam search uses, so scores are comparable to beam hypotheses.
         With a big inventory, only the top `prefilter` phrases by CTC score get the (expensive) attention decoder;
         the rest are returned with a CTC-only estimate flagged `prefiltered_out`.
+        With an enrolled patient profile active (self.profile, see enroll.py), each enrolled phrase also gets the
+        nearest-prototype bonus, added to `score` and reported as `proto`.
         """
+        bonus = self.profile.bonus(enc, phrases) if self.profile else {}
         if prefilter and len(phrases) > prefilter:
             ctc_all = self.ctc_scores(enc, phrases)
-            order = sorted(range(len(phrases)), key=lambda i: -ctc_all[i])
+            order = sorted(range(len(phrases)), key=lambda i: -(ctc_all[i] + bonus.get(phrases[i], 0.0)))
             keep = [phrases[i] for i in order[:prefilter]]
-            res = self._score_phrases_full(enc, keep)
+            res = self._score_phrases_full(enc, keep, bonus)
             floor = min(r["score"] for r in res)
             for i in order[prefilter:]:
-                res.append({"phrase": phrases[i], "att": None, "ctc": ctc_all[i], "score": min(ctc_all[i], floor) - 1.0, "n_tok": 0, "prefiltered_out": True})
+                b = bonus.get(phrases[i], 0.0)
+                res.append({"phrase": phrases[i], "att": None, "ctc": ctc_all[i], "proto": b, "score": min(ctc_all[i] + b, floor) - 1.0, "n_tok": 0, "prefiltered_out": True})
             return res
-        return self._score_phrases_full(enc, phrases)
+        return self._score_phrases_full(enc, phrases, bonus)
 
     @torch.no_grad()
-    def _score_phrases_full(self, enc, phrases):
+    def _score_phrases_full(self, enc, phrases, bonus):
         dev = self.decode_device
         toks = [self.tokenize(p) for p in phrases]
         B = len(toks)
@@ -211,7 +216,8 @@ class VSREngine:
         score = (1 - self.ctc_weight) * att + self.ctc_weight * ctc
         res = []
         for b, p in enumerate(phrases):
-            res.append({"phrase": p, "att": float(att[b]), "ctc": float(ctc[b]), "score": float(score[b]), "n_tok": len(toks[b])})
+            proto = bonus.get(p, 0.0)
+            res.append({"phrase": p, "att": float(att[b]), "ctc": float(ctc[b]), "proto": proto, "score": float(score[b]) + proto, "n_tok": len(toks[b])})
         res.sort(key=lambda r: -r["score"])
         return res
 
