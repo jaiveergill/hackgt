@@ -1,0 +1,271 @@
+"""Pluggable video sources. The camera process only ever talks to a VideoSource, so a laptop webcam, the USB camera
+on the glasses clip and a recorded file all drive the exact same live pipeline (preview, auto-listen, decode).
+
+Spec strings (server `--source`):
+  webcam            auto: probe indices 0-2, prefer the one that sees a face
+  webcam:1          OpenCV camera index 1 (preview is mirrored, selfie-style)
+  usb               first external camera (skips FaceTime / iPhone / Desk View / screen capture)
+  usb:1 | usb:Arducam   by index or by (substring of) the AVFoundation device name; preview not mirrored
+  file:data/eval/x.mp4[?loop=0&realtime=0&gap=0]   plays at native fps, loops by default (judging backup); see FileSource
+"""
+import math, os, re, sys, time, subprocess
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+class VideoSource:
+    """open() raises with the reason if the source can't deliver frames. read() -> (ok, bgr, ts): ts is strictly increasing,
+    in wall-clock seconds (time.time() scale) so manual listen start/stop windows line up. `discontinuity` is True for the
+    frame just returned if it jumps from the previous one (file loop), so motion trackers can reset."""
+    kind = "base"
+    mirror = False
+    discontinuity = False
+    finished = False  # a non-looping file reached its end
+
+    def open(self):
+        raise NotImplementedError
+
+    def read(self):
+        raise NotImplementedError
+
+    def release(self):
+        pass
+
+    def info(self):
+        return {"kind": self.kind, "mirror": self.mirror, "finished": self.finished}
+
+
+def _open_cv(index, width, height):
+    import cv2
+    cap = cv2.VideoCapture(index)
+    if not cap.isOpened():
+        return None
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+    cap.set(cv2.CAP_PROP_FPS, 30)
+    for _ in range(8):  # macOS cameras return a few black frames while warming up
+        ok, f = cap.read()
+        if ok and f is not None and f.mean() > 5:
+            return cap
+    cap.release()
+    return None
+
+
+class CameraSource(VideoSource):
+    """A live OpenCV camera. index=-1 probes 0-2 and keeps the one where `face_fn(rgb)` finds a face most often."""
+    kind = "webcam"
+    mirror = True
+
+    def __init__(self, index=-1, width=640, height=480, face_fn=None):
+        self.index, self.width, self.height, self.face_fn = index, width, height, face_fn
+        self.cap = None
+
+    def open(self):
+        if self.index >= 0:
+            self.cap = _open_cv(self.index, self.width, self.height)
+            if self.cap is None:
+                raise RuntimeError(f"camera index {self.index} did not deliver frames (unplugged, or camera permission denied?)")
+            return
+        import cv2
+        best, best_score = None, -1
+        for idx in (0, 1, 2):
+            c = _open_cv(idx, self.width, self.height)
+            if c is None:
+                continue
+            faces = 0
+            if self.face_fn is not None:
+                for _ in range(6):
+                    ok, f = c.read()
+                    if ok and self.face_fn(cv2.cvtColor(f, cv2.COLOR_BGR2RGB)):
+                        faces += 1
+            score = faces * 10 + (1 if abs(c.get(cv2.CAP_PROP_FRAME_WIDTH) / max(c.get(cv2.CAP_PROP_FRAME_HEIGHT), 1) - 4 / 3) < 0.05 else 0)
+            print(f"[source] probe index={idx} faces={faces}/6 score={score}")
+            if score > best_score:
+                if best is not None:
+                    best.release()
+                best, best_score, self.index = c, score, idx
+            else:
+                c.release()
+        if best is None:
+            raise RuntimeError("no camera at index 0-2 delivered frames (camera permission denied?)")
+        self.cap = best
+
+    def read(self):
+        ok, bgr = self.cap.read()
+        return ok, bgr, time.time()
+
+    def release(self):
+        if self.cap is not None:
+            self.cap.release()
+
+    def info(self):
+        return {**super().info(), "index": self.index}
+
+
+# AVFoundation devices that are not a USB camera on the glasses
+_BUILTIN = re.compile(r"facetime|iphone|desk view|capture screen|continuity|obs virtual", re.I)
+
+
+def list_devices():
+    """[(index, name)] of video devices via ffmpeg/AVFoundation (macOS). Same order as OpenCV's AVFoundation backend."""
+    out = subprocess.run(["ffmpeg", "-hide_banner", "-f", "avfoundation", "-list_devices", "true", "-i", ""],
+                         capture_output=True, text=True, timeout=10).stderr
+    devs, video = [], False
+    for line in out.splitlines():
+        if "video devices" in line:
+            video = True
+        elif "audio devices" in line:
+            break
+        elif video:
+            m = re.search(r"\[(\d+)\] (.+)$", line)
+            if m:
+                devs.append((int(m.group(1)), m.group(2).strip()))
+    return devs
+
+
+class USBSource(CameraSource):
+    """The camera on the glasses clip. Faces away from the wearer, so the preview is not mirrored."""
+    kind = "usb"
+    mirror = False
+
+    def __init__(self, which=None, width=640, height=480):
+        self.which, self.name = which, None
+        super().__init__(index=0, width=width, height=height)
+
+    def open(self):
+        devs = [d for d in list_devices() if not d[1].lower().startswith("capture screen")]
+        if self.which is None:
+            ext = [d for d in devs if not _BUILTIN.search(d[1])]
+            if not ext:
+                raise RuntimeError(f"no external camera found (devices: {devs})")
+            self.index, self.name = ext[0]
+        elif str(self.which).isdigit():
+            self.index = int(self.which)
+            self.name = dict(devs).get(self.index)
+        else:
+            hit = [d for d in devs if self.which.lower() in d[1].lower()]
+            if not hit:
+                raise RuntimeError(f"no camera matching {self.which!r} (devices: {devs})")
+            self.index, self.name = hit[0]
+        print(f"[source] usb -> index={self.index} name={self.name!r}")
+        super().open()
+
+    def info(self):
+        return {**super().info(), "name": self.name}
+
+
+class FileSource(VideoSource):
+    """Plays a recorded video as if it were a live camera, looping by default.
+    realtime=True paces frames at the file's native fps against the wall clock, dropping frames if the consumer falls
+    behind (like a real camera). realtime=False reads as fast as the consumer pulls, stamping frames with media time
+    (t_play + i/fps). That is for offline auto-listen segmentation tests only: media time runs ahead of the wall clock,
+    so manual listen and snapshot windows (which use time.time()) are meaningless in that mode.
+    loop_gap > 0 inserts that many seconds of the frozen last frame between plays. A frozen frame has zero motion,
+    unlike a real sensor, so the auto-listen noise floor decays toward 0 there; record real pauses for honest tests.
+    Frames wider than max_width are downscaled."""
+    kind = "file"
+    mirror = False
+
+    def __init__(self, path, realtime=True, loop=True, max_width=960, loop_gap=0.0):
+        self.path = path if os.path.isabs(path) else os.path.join(ROOT, path)
+        if not os.path.isfile(self.path):
+            raise FileNotFoundError(f"video file not found: {self.path}")
+        self.realtime, self.loop, self.max_width, self.loop_gap = realtime, loop, max_width, loop_gap
+        self.cap, self.fps, self.n_frames, self.plays = None, 25.0, 0, 0
+
+    def open(self):
+        import cv2
+        self.cap = cv2.VideoCapture(self.path)
+        if not self.cap.isOpened():
+            raise RuntimeError(f"OpenCV could not open {self.path}")
+        fps = self.cap.get(cv2.CAP_PROP_FPS)
+        self.fps = fps if 1 <= fps <= 240 else 25.0
+        self.n_frames = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        self._i = 0                  # frames consumed in the current play-through
+        self._t0 = time.time()       # time of frame 0 of the current play-through
+        self._last = None
+        print(f"[source] file {os.path.relpath(self.path, ROOT)} {self.fps:.2f} fps, {self.n_frames} frames, realtime={self.realtime} loop={self.loop}")
+
+    def read(self):
+        import cv2
+        if self.finished:
+            time.sleep(0.02)
+            return False, None, None
+        if self.realtime:
+            slot = math.floor((time.time() - self._t0) * self.fps) + 1  # next frame slot on this play's clock
+            if slot < 0:  # inside the loop gap: hold the last frame, stamped on the same clock (before frame 0)
+                time.sleep(max(self._t0 + slot / self.fps - time.time(), 0))
+                self.discontinuity = False
+                return True, self._last, self._t0 + slot / self.fps
+            while self._i < slot - 1:  # fell behind: skip frames, as a live camera would
+                if not self.cap.grab():
+                    break
+                self._i += 1
+            time.sleep(max(self._t0 + self._i / self.fps - time.time(), 0))
+        ok, bgr = self.cap.read()
+        if not ok:
+            if not self.loop or self._i == 0:
+                self.finished = True
+                print(f"[source] file finished after {self._i} frames")
+                return False, None, None
+            self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+            self._t0 += self._i / self.fps + self.loop_gap
+            self._i = 0
+            self.plays += 1
+            return self.read()
+        ts = self._t0 + self._i / self.fps
+        self.discontinuity = self._i == 0 and self.plays > 0
+        self._i += 1
+        if self.max_width and bgr.shape[1] > self.max_width:
+            h, w = bgr.shape[:2]
+            bgr = cv2.resize(bgr, (self.max_width, int(h * self.max_width / w)), interpolation=cv2.INTER_AREA)
+        self._last = bgr
+        return True, bgr, ts
+
+    def release(self):
+        if self.cap is not None:
+            self.cap.release()
+
+    def info(self):
+        return {**super().info(), "path": os.path.relpath(self.path, ROOT), "fps": round(self.fps, 2), "plays": self.plays,
+                "realtime": self.realtime, "loop": self.loop, "t_play": round(self._t0, 3)}  # time of frame 0 of this play
+
+
+def _flag(v):
+    return str(v).lower() not in ("0", "false", "no", "off")
+
+
+def make_source(spec, width=640, height=480, face_fn=None):
+    """Build a VideoSource from a spec string (see module docstring). An int is treated as a webcam index."""
+    spec = str(spec if spec is not None else "webcam").strip()
+    if spec.lstrip("-").isdigit():
+        spec = f"webcam:{spec}"
+    kind, _, arg = spec.partition(":")
+    kind = kind.lower()
+    if kind == "webcam":
+        return CameraSource(index=int(arg) if arg else -1, width=width, height=height, face_fn=face_fn)
+    if kind == "usb":
+        return USBSource(which=arg or None, width=width, height=height)
+    if kind == "file":
+        path, _, query = arg.partition("?")
+        opts = dict(kv.split("=", 1) for kv in query.split("&") if "=" in kv)
+        return FileSource(path, realtime=_flag(opts.get("realtime", 1)), loop=_flag(opts.get("loop", 1)),
+                          loop_gap=float(opts.get("gap", 0)))
+    raise ValueError(f"unknown video source {spec!r}; use webcam[:N] | usb[:N|name] | file:path.mp4")
+
+
+if __name__ == "__main__":  # quick check: python -m silent_running.sources file:data/samples/ted1_short.mp4
+    if len(sys.argv) < 2:
+        print("devices:", list_devices()); sys.exit()
+    src = make_source(sys.argv[1])
+    src.open()
+    t, n, last = time.time(), 0, -1.0
+    while time.time() - t < float(sys.argv[2] if len(sys.argv) > 2 else 5):
+        ok, f, ts = src.read()
+        if not ok:
+            if src.finished: break
+            continue
+        assert ts > last, f"timestamps went backwards: {ts} after {last}"
+        n, last = n + 1, ts
+    print(f"{n} frames in {time.time()-t:.2f}s -> {n/(time.time()-t):.1f} fps; info={src.info()}")
+    src.release()
