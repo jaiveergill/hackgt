@@ -271,3 +271,9 @@ body:has(#demobar.on) .col.left{padding-bottom:64px}
 
 .warmup{padding:6px 12px;border-radius:999px;border:1px solid rgba(255,181,71,.5);background:var(--panel2);font:700 11px Inter;letter-spacing:1.4px;text-transform:uppercase;color:var(--confirm)}
 .warmup[hidden]{display:none}
+
+.labelrow{margin-top:10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;font-size:12px;color:var(--dim)}
+.labelrow[hidden]{display:none}
+.labelrow button{padding:4px 10px;border-radius:8px;border:1px solid var(--line);background:var(--panel2);color:var(--text);font:600 12px Inter;cursor:pointer}
+.labelrow input{flex:1;min-width:220px;max-width:360px;padding:5px 9px;border-radius:8px;border:1px solid var(--line);background:var(--panel2);color:var(--text);font:500 12px Inter}
+.labelrow #lblstat{color:var(--muted)}

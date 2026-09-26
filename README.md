@@ -37,6 +37,19 @@ python scripts/session_report.py              # latest session
 python scripts/session_report.py --events     # plus a timeline of decodes, stalls and errors
 ```
 
+## Capture log: shared recognition data (commit this one)
+
+Every live camera utterance (webcam, USB, ESP32 `stream:`) is saved to `data/captures/`: the 96x96 mouth crops the model read
+(lossless, ~170 KB each) plus the ranking, decision and context, one JSONL file per server run so teammates never conflict.
+Under each result the UI asks **Was this right?** (✓, or type what was actually said). Push it so everyone's sessions add up:
+
+```bash
+git add data/captures && git commit -m "captures" && git push
+python scripts/captures.py stats      # accuracy at the time, top confusions
+python scripts/captures.py rescore    # re-read every labelled clip with this checkout: what a change fixed / broke
+```
+`SR_CAPTURE=0` turns it off; `SR_CAPTURE=all` also captures `--source file:...` playback (e.g. a phone recording).
+
 ## Using the UI
 
 * **Phrase Mode** (primary demo): hold **HOLD TO LISTEN** (or the space bar), silently mouth one of the phrases

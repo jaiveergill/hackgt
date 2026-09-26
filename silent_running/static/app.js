@@ -72,13 +72,14 @@ function setState(s,extra){
 function handle(m){
   logEvent(m);
   if(m.type==='hello'){setState(m.state.status);setWarm(m.state.warm);phrases=m.phrases;phraseTable=m.phrase_table||[];applyCtx(m.context);mode=m.state.mode;syncMode();if(m.state.expressive!=null)$('#expressive').checked=m.state.expressive;
-    $('#nphr').textContent=phrases.length+' phrases';$('#phrlist').innerHTML=phrases.map(p=>`<span>${esc(p)}</span>`).join('');buildChips();$('#log').innerHTML=LOG_EMPTY;(m.log||[]).forEach(addLog);
+    $('#nphr').textContent=phrases.length+' phrases';$('#phrlist').innerHTML=phrases.map(p=>`<span>${esc(p)}</span>`).join('');$('#phrasedl').innerHTML=phrases.map(p=>`<option value="${esc(p)}">`).join('');buildChips();$('#log').innerHTML=LOG_EMPTY;(m.log||[]).forEach(addLog);
     if(!DEMO){if(!$('#cam').getAttribute('src'))$('#cam').src='/stream?session='+Date.now();fetch('/api/state').then(r=>r.json()).then(s=>{$('#engine').textContent=`${s.engine.model} · ${phrases.length} phrases`;});
       if($('#voice').value.startsWith('clone:'))fillBank($('#voice').value.slice(6));}}  // the voice may be listed before the phrases
   else if(m.type==='status'){setState(m.status,m.stage);if(m.status==='processing'&&m.stage==='crop')toast('');}
   else if(m.type==='raw'){$('#raw').innerHTML=`<span class="lbl">raw (CTC greedy)</span>${esc(m.text)||'<span class="small">(nothing)</span>'}`;$('#nbest').innerHTML='';$('#lat').textContent=`crop ${ms(m.latency.crop)} · encode ${ms(m.latency.encode)} · ${m.n_frames} frames (${m.duration.toFixed(1)} s)`;}
-  else if(m.type==='result'){last=m;render(m,isQuiet(m));if(m.mode==='open'&&!$('#llm').checked)speakOnce(m.utt_id,m.selected);}  // Phrase Mode speaks on its decision; Open Mode has none
-  else if(m.type==='decision'){onDecision(m);}
+  else if(m.type==='result'){last=m;render(m,isQuiet(m));labelFor(m.utt_id,m.selected);if(m.mode==='open'&&!$('#llm').checked)speakOnce(m.utt_id,m.selected);}  // Phrase Mode speaks on its decision; Open Mode has none
+  else if(m.type==='decision'){onDecision(m);labelFor(m.utt_id,m.text);}
+  else if(m.type==='labeled'){if(lbl.utt===m.utt_id)$('#lblstat').textContent=`saved ✓ “${m.text}”`;}
   else if(m.type==='confirm'){onConfirm(m);}
   else if(m.type==='signal'){onSignal(m);}
   else if(m.type==='alert'){showAlert(m);}
@@ -398,6 +399,13 @@ const NURSE_LBL='Nurse';
 $('#nurse').onclick=()=>{const b=$('#nurse');b.classList.add('on');$('#nurselbl').textContent='Listening… 5 s';send({cmd:'nurse',seconds:5});setTimeout(()=>{b.classList.remove('on');$('#nurselbl').textContent=NURSE_LBL;},6500);};
 $('#nursesend').onclick=()=>{const t=$('#nursetext').value.trim();if(t){send({cmd:'nurse_text',text:t});$('#nursetext').value='';}};
 $('#nursetext').addEventListener('keydown',e=>{if(e.key==='Enter')$('#nursesend').click();});
+// ---------- corrections for data/captures: "what was actually said" for the latest utterance (scripts/captures.py)
+let lbl={utt:null,text:''};
+function labelFor(uid,text){if(DEMO||!uid)return;if(lbl.utt!==uid){$('#lbltext').value='';$('#lblstat').textContent='';}lbl={utt:uid,text:text||lbl.text};$('#labelrow').hidden=false;}
+function sendLabel(text){text=(text||'').trim();if(!text||lbl.utt==null)return;send({cmd:'label',utt_id:lbl.utt,text});$('#lblstat').textContent='saving…';}
+$('#lblok').onclick=()=>sendLabel(lbl.text);
+$('#lblsave').onclick=()=>sendLabel($('#lbltext').value);
+$('#lbltext').addEventListener('keydown',e=>{if(e.key==='Enter')sendLabel($('#lbltext').value);});
 
 // ---------- tabs / mode / settings / context
 $$('#tabs button').forEach(b=>b.onclick=()=>{$$('#tabs button').forEach(x=>x.classList.toggle('on',x===b));$$('.tab').forEach(t=>t.classList.toggle('on',t.id==='tab-'+b.dataset.tab));});
