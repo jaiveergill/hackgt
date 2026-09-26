@@ -73,7 +73,8 @@ function handle(m){
   logEvent(m);
   if(m.type==='hello'){setState(m.state.status);setWarm(m.state.warm);phrases=m.phrases;phraseTable=m.phrase_table||[];applyCtx(m.context);mode=m.state.mode;syncMode();if(m.state.expressive!=null)$('#expressive').checked=m.state.expressive;
     $('#nphr').textContent=phrases.length+' phrases';$('#phrlist').innerHTML=phrases.map(p=>`<span>${esc(p)}</span>`).join('');buildChips();$('#log').innerHTML=LOG_EMPTY;(m.log||[]).forEach(addLog);
-    if(!DEMO){if(!$('#cam').getAttribute('src'))$('#cam').src='/stream?session='+Date.now();fetch('/api/state').then(r=>r.json()).then(s=>{$('#engine').textContent=`${s.engine.model} · ${phrases.length} phrases`;});}}
+    if(!DEMO){if(!$('#cam').getAttribute('src'))$('#cam').src='/stream?session='+Date.now();fetch('/api/state').then(r=>r.json()).then(s=>{$('#engine').textContent=`${s.engine.model} · ${phrases.length} phrases`;});
+      if($('#voice').value.startsWith('clone:'))fillBank($('#voice').value.slice(6));}}  // the voice may be listed before the phrases
   else if(m.type==='status'){setState(m.status,m.stage);if(m.status==='processing'&&m.stage==='crop')toast('');}
   else if(m.type==='raw'){$('#raw').innerHTML=`<span class="lbl">raw (CTC greedy)</span>${esc(m.text)||'<span class="small">(nothing)</span>'}`;$('#nbest').innerHTML='';$('#lat').textContent=`crop ${ms(m.latency.crop)} · encode ${ms(m.latency.encode)} · ${m.n_frames} frames (${m.duration.toFixed(1)} s)`;}
   else if(m.type==='result'){last=m;render(m,isQuiet(m));if(m.mode==='open'&&!$('#llm').checked)speakOnce(m.utt_id,m.selected);}  // Phrase Mode speaks on its decision; Open Mode has none
@@ -88,7 +89,7 @@ function handle(m){
   else if(m.type==='error'){toast(m.message);}  // a failed decode comes with its own idle status
   else if(m.type==='context'){applyCtx(m.context);}
   else if(m.type==='state'){mode=m.state.mode;syncMode();setWarm(m.state.warm);}
-  else if(m.type==='prewarmed'){$('#clonestat').textContent=`voice “${m.speaker}” ready · ${m.n} phrase variants cached`;}
+  else if(m.type==='prewarmed'){$('#clonestat').textContent=`voice “${m.speaker}” ready · ${m.n} phrase variants cached`;if($('#voice').value==='clone:'+m.speaker)fillBank(m.speaker,true);}
   else if(m.type==='saved'){toast('saved '+m.file+' as "'+m.phrase+'"',true);}
 }
 function logEvent(m){
@@ -325,12 +326,13 @@ function toast(msg,good){const box=$('#err');if(!msg){box.innerHTML='';return;}[
 // ---------- voice
 function loadVoices(){voices.list=speechSynthesis.getVoices().filter(v=>v.lang.startsWith('en'));}
 speechSynthesis.onvoiceschanged=()=>{loadVoices();if(!DEMO)loadCloned();};loadVoices();if(!DEMO)setTimeout(loadCloned,500);
-let cloned=[],curU=null;const player=new Audio();
+let cloned=[],curU=null,curSrc=null,bankVoice=null;const player=new Audio(),actx=new AudioContext({latencyHint:'interactive'}),bank=new Map();
 // the automatic speech of an utterance: said once, and its start is that utterance's "first audio"
 function speakOnce(uid,text,opts){if(!text||!$('#autospeak').checked||spoken[uid]===text)return;spoken[uid]=text;speak(text,{...opts,utt_id:uid,onstart:()=>latMark(uid,'audio')});}
 // every browser utterance goes through here: a cancelled one must not fire its onend (a stale prompt_played, a repeated alert)
 // stop whatever is playing: a superseded clip must not fall back later, a cancelled utterance must not fire its onend / onerror
-function hush(){player.onerror=player.onplaying=player.onended=null;player.pause();if(curU)curU.onend=curU.onerror=null;speechSynthesis.cancel();}
+function hush(){player.onerror=player.onplaying=player.onended=null;player.pause();if(curU)curU.onend=curU.onerror=null;speechSynthesis.cancel();
+  if(curSrc){curSrc.onended=null;curSrc.stop();curSrc=null;}}
 function utter(text,v,opts){hush();const u=curU=new SpeechSynthesisUtterance(text);if(v)u.voice=v;u.onstart=opts.onstart||null;u.onend=opts.onend||null;
   u.onerror=e=>toast('Browser speech failed: '+e.error);speechSynthesis.speak(u);}
 const patientVoice=()=>voices.list.find(v=>v.name==='Samantha')||voices.list[0];
@@ -342,20 +344,41 @@ function speak(text,opts){if(!text)return;const sel=$('#voice').value||'';opts=o
     // the utterance's face sets the emotion whatever is said for it (lip phrase, LLM/Grok pick, a tapped candidate);
     // the mouthed word timing (rate + server retime) only fits the lip result's own phrase
     const cur=last&&opts.utt_id===last.utt_id,own=cur&&text===last.selected;
-    const ex=(opts.expression)||(cur&&last.expression)||{emotion:'neutral',intensity:0};const tm=(own&&last.timing)||{};
+    const ex=(opts.expression)||(cur&&last.expression)||{emotion:'neutral',intensity:0};const pace=$('#pace').checked,tm=(pace&&own&&last.timing)||{};
     let emo=opts.emotion||ex.emotion||'neutral',inten=opts.intensity!=null?opts.intensity:(ex.intensity||0),rate=tm.rate||1;
     if(emo==='urgent'){emo='angry';inten=0.7;rate=1.1;}
-    const expressive=$('#expressive').checked;
-    const url=expressive?`/api/say?text=${encodeURIComponent(text)}&emotion=${emo}&intensity=${inten}&rate=${rate}&voice=${encodeURIComponent(sp)}&utt_id=${own?last.utt_id:0}&_=${Date.now()}`:`/api/tts?text=${encodeURIComponent(text)}&voice=${encodeURIComponent(sp)}&_=${Date.now()}`;
-    player.onended=()=>{player.onended=null;if(opts.onend)opts.onend();};player.onplaying=opts.onstart||null;
-    // onerror is the single fallback path: it fires only for the current src (a superseded load is aborted, not errored)
-    player.src=url;player.onerror=()=>{speakBrowser(text,opts,true);};
-    player.play().catch(e=>{  // AbortError: a newer speak() replaced this src; NotSupportedError: the source failed and onerror fell back
-      if(e.name==='NotAllowedError')toast('Click anywhere on the page once to enable audio, then try again.');else if(e.name!=='AbortError'&&e.name!=='NotSupportedError')toast('Audio playback failed: '+e.message);});
+    const face=$('#expressive').checked,ov=$('#override').value;  // the server applies the face switch and a forced emotion
+    const plain=rate===1&&(!face||(ov?ov==='neutral':(emo==='neutral'||!(inten>0))));  // what /api/tts says: neutral, natural pace
+    const buf=plain&&actx.state==='running'&&bank.get(bankKey(sp,text));
+    if(buf){const src=curSrc=actx.createBufferSource();src.buffer=buf;src.connect(actx.destination);
+      src.onended=()=>{curSrc=null;if(opts.onend)opts.onend();};src.start();if(opts.onstart)opts.onstart();
+      const d=$('#delivrep');if(d)d.textContent='played from the voice bank (neutral, natural pace)';}
+    else{const q=`text=${encodeURIComponent(text)}&voice=${encodeURIComponent(sp)}&_=${Date.now()}`;  // not banked yet: streamed, then banked
+      const url=plain?`/api/tts_stream?${q}`:`/api/say?${q}&emotion=${emo}&intensity=${inten}&rate=${rate}&utt_id=${own?last.utt_id:0}&retime=${pace?1:0}`;
+      let started=false;const d=$('#delivrep');if(d&&plain)d.textContent='streamed from ElevenLabs (not in the voice bank yet)';
+      player.onended=()=>{player.onended=null;if(plain)bankLoad(sp,text).catch(e=>toast('Voice bank: could not add a phrase: '+e.message));if(opts.onend)opts.onend();};
+      player.onplaying=()=>{started=true;if(opts.onstart)opts.onstart();};
+      // onerror is the single fallback path: it fires only for the current src (a superseded load is aborted, not errored);
+      // once audio has played, repeating the whole phrase in the browser voice would say it twice
+      player.src=url;player.onerror=()=>{if(started)toast('The voice stopped mid-phrase (ElevenLabs failed)');else speakBrowser(text,opts,true);};
+      player.play().catch(e=>{  // AbortError: a newer speak() replaced this src; NotSupportedError: the source failed and onerror fell back
+        if(e.name==='NotAllowedError')toast('Click anywhere on the page once to enable audio, then try again.');else if(e.name!=='AbortError'&&e.name!=='NotSupportedError')toast('Audio playback failed: '+e.message);});}
     if(!$('#conf').querySelector('.voicepill'))$('#conf').insertAdjacentHTML('beforeend',`<span class="pill ctx voicepill">voice: ${esc(sp)}</span>`);}
   else speakBrowser(text,opts);}
-function loadCloned(){fetch('/api/voices').then(r=>r.json()).then(j=>{cloned=j.voices||[];const sel=$('#voice');const add=(val,label)=>{if(![...sel.options].some(o=>o.value===val)){const o=document.createElement('option');o.value=val;o.textContent=label;sel.insertBefore(o,sel.firstChild);}};(j.stock||[]).slice().reverse().forEach(v=>add('clone:'+v.name,`☁ ${v.name} (ElevenLabs)`));cloned.forEach(v=>add('clone:'+v.speaker,`🎙 ${v.speaker} (my voice)`));if(j.selected&&j.available){sel.value='clone:'+j.selected;}});}
-$('#voice').addEventListener('change',e=>{const v=e.target.value;send({cmd:'settings',voice:v.startsWith('clone:')?v.slice(6):null});});
+// Neutral speech at the natural pace in an ElevenLabs voice: every phrase the server has cached is decoded into a Web Audio
+// buffer when the voice is picked, so it starts at once instead of after a fetch and decode. Other text joins once played.
+const bankKey=(sp,text)=>sp+'|'+text.trim().toLowerCase();
+['pointerdown','keydown'].forEach(e=>window.addEventListener(e,()=>{if(actx.state!=='running')actx.resume();},{capture:true}));  // autoplay policy
+async function bankLoad(sp,text){const r=await fetch(`/api/tts?text=${encodeURIComponent(text)}&voice=${encodeURIComponent(sp)}&cached_only=1`);
+  if(r.ok&&bankVoice===sp)bank.set(bankKey(sp,text),await actx.decodeAudioData(await r.arrayBuffer()));}
+async function fillBank(sp,reload){  // cached phrases only: synthesizing the rest here would spend ElevenLabs credits on every page load
+  if(!sp||!phrases.length||(bankVoice===sp&&!reload))return;bankVoice=sp;bank.clear();const todo=phrases.slice(),t0=performance.now();let failed=0;
+  await Promise.all(Array.from({length:6},async()=>{while(todo.length&&bankVoice===sp)await bankLoad(sp,todo.shift()).catch(()=>failed++);}));
+  if(bankVoice!==sp)return;
+  $('#bankstat').textContent=`${bank.size}/${phrases.length} phrases play instantly`+(failed?` · ${failed} failed to load`:'');$('#bankstat').title=`voice bank loaded in ${((performance.now()-t0)/1000).toFixed(1)} s`;
+  if(failed)toast(`Voice bank: ${failed} phrases failed to load; they will stream from ElevenLabs instead`);}
+function loadCloned(){fetch('/api/voices').then(r=>r.json()).then(j=>{cloned=j.voices||[];const sel=$('#voice');const add=(val,label)=>{if(![...sel.options].some(o=>o.value===val)){const o=document.createElement('option');o.value=val;o.textContent=label;sel.insertBefore(o,sel.firstChild);}};(j.stock||[]).slice().reverse().forEach(v=>add('clone:'+v.name,`☁ ${v.name} (ElevenLabs)`));cloned.forEach(v=>add('clone:'+v.speaker,`🎙 ${v.speaker} (my voice)`));if(j.selected&&j.available){sel.value='clone:'+j.selected;}if(sel.value.startsWith('clone:'))fillBank(sel.value.slice(6));});}
+$('#voice').addEventListener('change',e=>{const v=e.target.value;send({cmd:'settings',voice:v.startsWith('clone:')?v.slice(6):null});if(v.startsWith('clone:'))fillBank(v.slice(6));});
 
 // ---------- listen button + keyboard (space = listen, Y/N = answer "sounds like", Esc = dismiss alert)
 const lb=$('#listen');let held=false;
@@ -405,7 +428,7 @@ $('#clonebtn').onclick=async()=>{
       const blob=new Blob(recChunks,{type:'audio/webm'});st.textContent=`uploading ${(blob.size/1024).toFixed(0)} KB, cloning…`;
       const r=await fetch(`/api/voice/clone_upload?speaker=${encodeURIComponent(name)}`,{method:'POST',body:blob});const j=await r.json();
       if(j.error){st.textContent='clone failed: '+j.error;return;}
-      st.textContent=`cloned ✓ (${j.audio_seconds}s audio) · pre-synthesizing phrase bank…`;loadCloned();setTimeout(()=>{$('#voice').value='clone:'+name;},800);};
+      st.textContent=`cloned ✓ (${j.audio_seconds}s audio) · pre-synthesizing phrase bank…`;loadCloned();setTimeout(()=>{$('#voice').value='clone:'+name;fillBank(name,true);},800);};  // a new clone: the old one's audio must go
     rec.start(1000);
   }catch(e){$('#clonestat').textContent='mic error: '+e;}
 };
