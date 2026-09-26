@@ -24,8 +24,8 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PROFILE_DIR = os.path.join(ROOT, "data", "profiles")
 NAME = re.compile(r"[A-Za-z0-9_-]+")
 # log-loss fit on all 8 MIRACL speakers; the held-out (leave-one-speaker-out) numbers are in results/enroll_miracl.md
-SLOPE = float(os.environ.get("ENROLL_SLOPE", "85.1"))   # nats per unit of DTW cosine similarity
-OFFSET = float(os.environ.get("ENROLL_OFFSET", "12.4"))  # nats; the evidence is 0 at s = mu + OFFSET / SLOPE
+SLOPE = 85.1   # nats per unit of DTW cosine similarity
+OFFSET = 12.4   # nats; the evidence is 0 at s = mu + OFFSET / SLOPE
 MIN_PHRASES = 5  # a profile gives evidence once this many phrases have takes: the smallest profile the held-out eval covers
 
 

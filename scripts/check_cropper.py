@@ -59,7 +59,6 @@ def clip_items(path, fl, rng):
         frames = [f.to_ndarray(format="rgb24") for f in c.decode(video=0)]
     t0 = 1000.0 + rng.uniform(0, 1)
     ts = t0 + np.arange(len(frames)) / fps + rng.uniform(-0.003, 0.003, len(frames))
-    fl.t_ms = 0
     lms = [fl(np.ascontiguousarray(f), (t - t0) * 1000.0 + 1)[0] for f, t in zip(frames, ts)]
     return [(float(t), f, l) for t, f, l in zip(ts, frames, lms)], fps
 

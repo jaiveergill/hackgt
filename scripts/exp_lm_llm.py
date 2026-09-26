@@ -2,7 +2,7 @@
 Uses the TED clips (audio stripped) with their YouTube reference captions."""
 import os, sys, time, json, re
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-import torch, torchaudio
+import torchaudio
 from silent_running.vsr import VSREngine, ROOT
 from silent_running.context import OpenAIChooser
 

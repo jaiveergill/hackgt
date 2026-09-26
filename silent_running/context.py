@@ -69,12 +69,12 @@ class ContextStore:
 
 
 class OpenAIChooser:
-    """OpenAI-backed chooser. Used asynchronously (never on the primary Phrase Mode path).
+    """OpenAI proposer for Open Mode's verified correction (server._bg_llm). Never on the Phrase Mode path.
     Reads OPENAI_API_KEY from the environment / project .env."""
     def __init__(self, model="gpt-4o-mini", timeout=20):
         from dotenv import load_dotenv
         load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env"))
-        self.model, self.timeout = model, timeout
+        self.model = model
         self.key = os.environ.get("OPENAI_API_KEY", "")
         self.client = None
         if self.key:
@@ -83,38 +83,6 @@ class OpenAIChooser:
 
     def available(self):
         return self.client is not None
-
-    def prewarm(self):
-        return self.available()
-
-    def choose(self, candidates, context, mode="phrase"):
-        """Pick among VSR-supported candidates. Returns {index, reason, corrected} or {"error": ...}."""
-        if self.client is None:
-            return {"error": "OPENAI_API_KEY not set"}
-        sys_p = ("You help decode silent lip-reading for a hospital patient who cannot speak. You receive candidate "
-                 "transcripts from a visual speech model (higher score = more visual support) and context. Choose the index of the "
-                 "candidate the patient most plausibly said. Prefer higher-scored candidates unless context clearly favors another. "
-                 "Never invent content that is not in the candidates.")
-        if mode == "open":
-            sys_p += (" Also give a minimally corrected, naturally-cased version of the chosen candidate in 'corrected' "
-                      "(fix at most one obvious lip-reading confusion; keep the same words otherwise).")
-        lines = "\n".join(f"{i}. {c['text']} (score {c['score']:.1f})" for i, c in enumerate(candidates))
-        user = f"Context: {json.dumps(context)}\nCandidates:\n{lines}"
-        schema = {"type": "object", "additionalProperties": False,
-                  "properties": {"index": {"type": "integer"}, "reason": {"type": "string"}, "corrected": {"type": "string"}},
-                  "required": ["index", "reason", "corrected"]}
-        try:
-            r = self.client.chat.completions.create(
-                model=self.model, temperature=0,
-                messages=[{"role": "system", "content": sys_p}, {"role": "user", "content": user}],
-                response_format={"type": "json_schema", "json_schema": {"name": "choice", "strict": True, "schema": schema}})
-            out = json.loads(r.choices[0].message.content)
-            i = int(out.get("index", 0))
-            if not (0 <= i < len(candidates)):
-                return {"error": f"index {i} out of range"}
-            return {"index": i, "reason": out.get("reason", ""), "corrected": out.get("corrected") or candidates[i]["text"]}
-        except Exception as e:
-            return {"error": str(e)}
 
     def propose(self, candidates, context):
         """Generative error correction: propose ONE corrected sentence built from the visual hypotheses.

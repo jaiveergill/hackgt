@@ -74,16 +74,6 @@ def stock_voices():
     return _stock_cache
 
 
-def can_clone():
-    c = _client()
-    if c is None:
-        return False
-    try:
-        return bool(getattr(c.user.subscription.get(), "can_use_instant_voice_cloning", False))
-    except Exception:
-        return False
-
-
 def prepare_clone_audio(wav_paths, out_mp3):
     """Concatenate takes, trim silences > 0.5 s, normalize, export one MP3 for cloning."""
     lst = out_mp3 + ".txt"
@@ -118,16 +108,6 @@ def create_voice(speaker, wav_paths, description="Silent Running patient voice")
     rec = {"speaker": speaker, "voice_id": voice_id, "created": time.time(), "audio_seconds": round(dur, 1), "n_takes": len(wav_paths)}
     json.dump(rec, open(os.path.join(VOICES_DIR, f"{speaker}.json"), "w"), indent=1)
     return rec
-
-
-def delete_voice(speaker):
-    """Remove the clone from ElevenLabs (consent hygiene after the event)."""
-    c = _client(); vid = voice_for(speaker)
-    if c and vid:
-        c.voices.delete(vid)
-    p = os.path.join(VOICES_DIR, f"{speaker}.json")
-    if os.path.exists(p):
-        os.remove(p)
 
 
 def plan_delivery(text, emotion="neutral", intensity=0.0, rate=1.0):

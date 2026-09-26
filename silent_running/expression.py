@@ -43,7 +43,6 @@ class ExpressionTracker:
         self.baseline = {e: 0.0 for e in EMOTIONS}
         self.live = {e: 0.0 for e in EMOTIONS}
         self.utt = []          # scores during the current listen window
-        self.listening = False
 
     def update(self, bs, listening):
         sc = frame_scores(bs) if bs else None
@@ -59,7 +58,6 @@ class ExpressionTracker:
             if len(self.baseline_buf) >= 15:
                 for e in EMOTIONS:
                     self.baseline[e] = float(np.median([s[e] for s in self.baseline_buf]))
-        self.listening = listening
 
     def start(self):
         self.utt = []
@@ -103,13 +101,11 @@ class FaceLandmarker:
                                             min_face_detection_confidence=0.5, min_tracking_confidence=0.5)
         self.lm = vision.FaceLandmarker.create_from_options(opts)
         self.mp = mp
-        self.t_ms = 0
 
-    def __call__(self, rgb, ts_ms=None):
+    def __call__(self, rgb, ts_ms):
         """-> (keypoints 4x2 int array or None, blendshapes dict or None)"""
-        self.t_ms = int(ts_ms) if ts_ms is not None else self.t_ms + 33
         img = self.mp.Image(image_format=self.mp.ImageFormat.SRGB, data=rgb)
-        res = self.lm.detect_for_video(img, self.t_ms)
+        res = self.lm.detect_for_video(img, int(ts_ms))
         if not res.face_landmarks:
             return None, None
         h, w = rgb.shape[:2]

@@ -8,7 +8,7 @@ Shows a preview window with the prompt phrase. Press SPACE to start recording, S
   data/eval/<speaker>/<phrase_slug>__<take>.mp4   (25 fps, 640x480, no audio)
 and appended to data/eval/manifest.jsonl with the intended phrase.
 """
-import argparse, os, re, json, time, sys
+import argparse, os, re, json, time
 import cv2
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -44,7 +44,6 @@ def main():
     queue = [(p, r) for r in range(args.reps) for p in phrases]
     i = 0
     recording = False
-    writer = None
     frames = []
     t_last = time.time()
     interval = 1.0 / args.fps
