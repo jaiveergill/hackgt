@@ -6,7 +6,8 @@ Serves silent_running/ on a free port, opens /static/index.html?demo=1 in headle
 protocol, and waits (real time) for each expected UI state in order: hero state / text / source badge, nonverbal chips,
 the critical alert, then a manual space-bar take. Then, with the scenes paused: a 40-message conversation at 1920x1080 and
 1280x720 (the page must not grow and the newest message must be in view), an injection fuzz over every string field the
-UI renders, and speak(): the face emotion for non-lip text, and a superseded playback not falling back to the browser voice.
+UI renders, the hand-signal chips and hand-tracker state, the confirm prompt protocol, and speak(): the face emotion for non-lip text, and a superseded
+playback not falling back to the browser voice.
 Prints expected vs actual per step and any page JS exceptions.
 Exit code 0 = every step reached and no exceptions.
 """
@@ -111,7 +112,8 @@ LONG_LOG_EXP = {"page_fits": True, "log_scrolls": True, "newest_in_view": True}
 # Every string field of every event the UI renders carries an HTML payload; none may become markup.
 FUZZ_JS = """(()=>{const P='<img src=x onerror="window.__xss=(window.__xss||0)+1">',u=900,lat={crop:.1,encode:.1,phrase:.1,total:.3};
   const tm={duration:1,rate:1,pauses:[],words:[{word:P,start:0,end:.5}]},ex={emotion:P,intensity:.5,scores:{[P]:.5}};
-  const nv={head:{value:P,confidence:.9},fingers:{value:P,confidence:.9},blink_code:{value:P,confidence:.9},pain:{value:.5,confidence:.9},emotion:{label:P,intensity:.5}};
+  const nv={head:{value:P,confidence:.9},fingers:{value:P,confidence:.9},blink_code:{value:P,confidence:.9},pain:{value:.5,confidence:.9},emotion:{label:P,intensity:.5},
+    thumb:{value:P,confidence:.9},point:{value:P,confidence:.9}};meta({hands:P});
   [{type:'raw',utt_id:u,text:P,n_frames:10,duration:1,latency:lat},
    {type:'result',utt_id:u,mode:'open',selected:P,confidence:.5,nbest:[{text:P,score:1,prob:.5}],n_frames:10,duration:1,expression:ex,timing:tm,latency:lat,nonverbal:nv},
    {type:'llm',utt_id:u,changed:true,accepted:true,corrected:P,proposal:P,reason:P,model:P,gap:1,latency:.3},{type:'nbest',utt_id:u,nbest:[{text:P,score:1,prob:.5}]},
@@ -129,6 +131,24 @@ FUZZ_JS = """(()=>{const P='<img src=x onerror="window.__xss=(window.__xss||0)+1
 FUZZ_EXP = {"xss_fired": 0, "injected_imgs": 0}
 
 # speak() with an ElevenLabs voice selected (the static server 404s /api/say, so a source failure is exercised too).
+# Hand signals: live thumb / point chips (directions from the patient's side), and a disabled hand tracker shown on the camera.
+HANDS_JS = """(()=>{const t=s=>document.querySelector(s).textContent,r={};
+  handle({type:'signal',kind:'thumb',value:'down',confidence:.8,ts:0});r.thumb=t('#sig-hand .v');
+  handle({type:'signal',kind:'point',value:'left',confidence:.8,ts:0});r.point=t('#sig-hand .v');
+  meta({hands:'off: FileNotFoundError: models/hand_landmarker.task'});r.badge=t('#hands');r.chips_off=document.querySelectorAll('.sig.off').length;
+  meta({hands:'on'});r.chips_off_after_on=document.querySelectorAll('.sig.off').length;return r})()"""
+HANDS_EXP = {"thumb": "Thumb down 80%", "point": "Pointing patient's left 80%", "badge": "hand signals off: FileNotFoundError: models/hand_landmarker.task",
+             "chips_off": 2, "chips_off_after_on": 0}
+
+# "Sounds like X?" from the server: said in a non-patient voice; its end reports prompt_played and starts the countdown; Y answers.
+# (Headless Chrome never fires a speech utterance's onend, so it is called here.)
+PROMPT_JS = """(()=>{const sent=[],o=transport.send;transport.send=x=>{sent.push(x)};
+  handle({type:'confirm',utt_id:1000,candidate:'I am cold',attempt:1,state:'asking',say:'Sounds like: I am cold?',say_voice:'system',timeout:4,confidence:.4});
+  const r={said:curU.text,voice_differs_from_patient:!!curU.voice&&curU.voice!==patientVoice(),countdown_before_end:!!cf.anims};curU.onend();r.countdown_after_end=!!cf.anims;
+  window.dispatchEvent(new KeyboardEvent('keydown',{key:'y'}));r.sent=sent;transport.send=o;return r})()"""
+PROMPT_EXP = {"said": "Sounds like: I am cold?", "voice_differs_from_patient": True, "countdown_before_end": False, "countdown_after_end": True,
+              "sent": [{"cmd": "prompt_played", "utt_id": 1000, "attempt": 1}, {"cmd": "answer", "value": "yes"}]}
+
 SPEAK_JS = """(()=>{const s=document.querySelector('#voice'),o=document.createElement('option');o.value='clone:T';s.appendChild(o);s.value='clone:T';
   const spoken=[],sp=speechSynthesis.speak.bind(speechSynthesis);speechSynthesis.speak=x=>{spoken.push(x.text);sp(x)};
   handle({type:'result',utt_id:7,mode:'phrase',selected:'I am cold',confidence:.8,visual_top:'I am cold',in_inventory:true,n_frames:40,duration:1.6,latency:{crop:.05,encode:.1,phrase:.2,total:.35},
@@ -137,9 +157,11 @@ SPEAK_JS = """(()=>{const s=document.querySelector('#voice'),o=document.createEl
   const q=()=>{const u=new URL(player.src).searchParams;return ['emotion','intensity','rate','utt_id'].map(k=>k+'='+u.get(k)).join('&')};
   const r={};speak('I am cold',{utt_id:7});r.lip_phrase=q();speak('I am freezing',{utt_id:7});r.llm_text=q();
   document.querySelectorAll('#dym button')[1].click();r.candidate_tap=q();
-  return new Promise(res=>setTimeout(()=>{spoken.length=0;speak('FIRST');speak('SECOND');setTimeout(()=>{r.browser_fallback=spoken;res(r)},1500)},800))})()"""
+  const after=(ms,f)=>new Promise(res=>setTimeout(()=>res(f()),ms));
+  return after(800,()=>{spoken.length=0;speak('FIRST');speak('SECOND')}).then(()=>after(1500,()=>{r.browser_fallback=[...spoken];spoken.length=0;speak('THIRD');speakSystem('PROMPT',{})}))
+    .then(()=>after(1500,()=>{r.clip_then_prompt=[...spoken];return r}))})()"""
 SPEAK_EXP = {"lip_phrase": "emotion=sad&intensity=0.8&rate=1.3&utt_id=7", "llm_text": "emotion=sad&intensity=0.8&rate=1&utt_id=0",
-             "candidate_tap": "emotion=sad&intensity=0.8&rate=1&utt_id=0", "browser_fallback": ["SECOND"]}
+             "candidate_tap": "emotion=sad&intensity=0.8&rate=1&utt_id=0", "browser_fallback": ["SECOND"], "clip_then_prompt": ["PROMPT"]}
 
 
 def wait_for(page, exp, timeout):
@@ -180,7 +202,9 @@ def main():
             page.eval("document.querySelector('#log').innerHTML=''")
             checks.append((f"long conversation (40 messages) at {w}x{h}", LONG_LOG_EXP, page.eval(LONG_LOG_JS)))
         checks.append(("HTML payload in every rendered string field", FUZZ_EXP, page.eval(FUZZ_JS)))
-        checks.append(("speak(): face emotion for non-lip text, no fallback for a superseded playback", SPEAK_EXP, page.eval(SPEAK_JS)))
+        checks.append(("hand signals: thumb / point chips, hand tracker off", HANDS_EXP, page.eval(HANDS_JS)))
+        checks.append(("confirm prompt: system voice, prompt_played on its end, countdown, Y answers", PROMPT_EXP, page.eval(PROMPT_JS)))
+        checks.append(("speak(): face emotion for non-lip text, no fallback for a superseded clip (by speech or a prompt)", SPEAK_EXP, page.eval(SPEAK_JS)))
         for name, exp, got in checks:
             ok = got == exp
             fails += not ok
