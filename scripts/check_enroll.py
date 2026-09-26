@@ -10,7 +10,7 @@ Part 2, the enrollment flow through the real server.py functions (events capture
   prompt; while enrolling nothing is decoded (second start, decode_file, a queued utterance) and capture errors keep the
   prompt; a take that contradicts the phrase's earlier take is rejected; undo re-prompts; starting enrollment cancels a
   pending confirmation and takes never produce a decision or confirmation; a profile switch requested mid-decode waits
-  for that decode; a session stopped too early falls back to the generic model. Profiles go to a temporary directory.
+  for that decode; a session stopped too early falls back to the generic model; /api/enroll/file refuses non-25-fps clips. Profiles go to a temporary directory.
   Prints PASS/FAIL with expected vs actual; exit 1 on any failure.
 """
 import argparse, fcntl, os, shutil, sys, tempfile, threading
@@ -151,6 +151,9 @@ def server_flow(engine, clips, inventory):
     S._decode_utterance(utterance(engine, take(inventory[0], genuine)))
     check(sess.profile.counts()[inventory[0]] == 2, f"genuine take {genuine} of {inventory[0]!r}", "stored (2 takes)",
           f"{sess.profile.counts()[inventory[0]]} {[e.get('message') for e in events if e['type'] == 'error']}")
+    r = S.api_enroll_file(path=take(inventory[3], 4))
+    check(getattr(r, "status_code", 200) == 400 and b"fps" in r.body, "a 15 fps clip through /api/enroll/file", "400: takes must be 25 fps",
+          f"{getattr(r, 'status_code', 200)} {r.body.decode() if hasattr(r, 'body') else r}")
     r = S.api_enroll_undo()
     check(r["removed"] == inventory[0] and sess.profile.counts()[inventory[0]] == 1 and sess.prompt == inventory[0], "undo",
           f"removes the take of {inventory[0]!r} and prompts it again", f"removed {r['removed']!r}, counts {sess.profile.counts()[inventory[0]]}, prompt {sess.prompt!r}")
