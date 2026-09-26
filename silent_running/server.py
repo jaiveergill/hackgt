@@ -381,7 +381,9 @@ def index():
     return HTMLResponse(open(os.path.join(STATIC, "index.html")).read())
 
 
-def mjpeg():
+async def mjpeg():
+    # Async so the stream is cancelled when the client disconnects or the server shuts down. As a sync generator it ran
+    # in a worker thread stuck in time.sleep: a closed tab left it looping forever and SIGTERM never finished (1 GB leaked).
     boundary = b"--frame"
     last = None
     while True:
@@ -389,7 +391,7 @@ def mjpeg():
         if jpg is not None and jpg is not last:
             last = jpg
             yield boundary + b"\r\nContent-Type: image/jpeg\r\nContent-Length: " + str(len(jpg)).encode() + b"\r\n\r\n" + jpg + b"\r\n"
-        time.sleep(1 / 20)
+        await asyncio.sleep(1 / 20)
 
 
 @app.get("/stream")
@@ -934,7 +936,8 @@ def main():
         STATE["warm"] = True  # engine warmup (above) and aligner prewarm are done: latency measured from now on is steady state
     threading.Thread(target=_prewarm_aligner, daemon=True).start()
     import uvicorn
-    uvicorn.run(app, host="127.0.0.1", port=args.port, log_level="warning")
+    # an open preview (/stream) never ends on its own: give open connections 3 s on shutdown, then close them
+    uvicorn.run(app, host="127.0.0.1", port=args.port, log_level="warning", timeout_graceful_shutdown=3)
 
 
 if __name__ == "__main__":
