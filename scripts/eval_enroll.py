@@ -1,29 +1,40 @@
-"""Patient enrollment eval: Phrase Mode top-1 with the generic model vs with each speaker's own enrolled prototypes.
+"""Patient enrollment eval: generic Phrase Mode vs the calibrated template evidence of enroll.py, held out by speaker.
 
-  python scripts/eval_enroll.py --miracl ~/.cache/silent_running/miracl/full --enroll 1,2,3 --tag miracl
-  python scripts/eval_enroll.py --manifest data/eval/manifest.jsonl --enroll 1,2 --tag ours
+  python scripts/eval_enroll.py --miracl ~/.cache/silent_running/miracl/full --tag miracl
+  python scripts/eval_enroll.py --manifest data/eval/manifest.jsonl --tag ours
 
-Protocol, per speaker: the first K takes of every phrase are enrolled, the takes after the largest K are the test set
-(identical for every K). The prototype weight is chosen by 2-fold cross-validation over speakers (tuned on one half,
-scored on the other), so the reported "enrolled" number never saw its own test speakers during tuning.
-A final pass runs the real path (engine.profile = Profile, engine.score_phrases) and checks it agrees with the sweep.
-Writes results/enroll_<tag>.md.
+Every clip is encoded once (cached), scored by the generic model over the inventory, and compared with every other clip
+by DTW. Protocols (test = the last two takes of every phrase; profiles are built from earlier takes of the SAME clips set):
+  all K=k         the speaker's own profile, takes 1..k of every phrase
+  half            takes 1..2 of half the phrases (both halves in turn); accuracy on enrolled and unenrolled phrases
+  one not enrolled  takes 1..2 of all phrases but the tested one
+  other speaker   another speaker's profile (takes 1..3) is active
+The evidence parameters (SLOPE, OFFSET) are fitted by minimising the log-loss of the decoder's posterior on the other
+speakers' "all K" and "half" instances (leave-one-speaker-out); every number in the tables is on the held-out speaker.
+Then: reliability of the confidence, how often a nurse question can change a decision, the enrollment take gate, a
+real-path check (PhraseDecoder with a real Profile, the server's code path) and latency on real features.
+Holds the machine-wide lock (the model needs ~2 GB). Writes results/enroll_<tag>.md.
 """
-import argparse, hashlib, json, os, sys, time
+import argparse, fcntl, hashlib, json, os, sys, time
 from collections import defaultdict
 import av
 import numpy as np
 import torch
+import torch.nn.functional as F
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 from silent_running.vsr import VSREngine, load_phrases, _read_video
-from silent_running.enroll import Profile, dtw_similarity
+from silent_running.enroll import Profile, dtw_similarity, impostor_mean, best_per_phrase, SLOPE, OFFSET
+from silent_running.decoder import PhraseDecoder
+from silent_running.context import ContextStore
 
 MIRACL_PHRASES = ["Stop navigation", "Excuse me", "I am sorry", "Thank you", "Good bye", "I love this game",
                   "Nice to meet you", "You are welcome", "How are you", "Have a good time"]
 CACHE = os.path.expanduser("~/.cache/silent_running/enroll_eval")
-WEIGHTS = [0, 2, 5, 10, 15, 20, 30, 50, 80, 150, 1000]
+UNRELATED = ["data/samples/ted1_short.mp4", "data/samples/ted1_12s.mp4"]  # speech that is none of the phrases
+BINS = [(0.0, 0.5), (0.5, 0.6), (0.6, 0.9), (0.9, 1.01)]  # server thresholds: critical alert 0.5, speak without asking 0.6
+TRAIN = ("all K=1", "all K=2", "all K=3", "half: enrolled phrases", "half: unenrolled phrases")
 
 
 def miracl_clips(d):
@@ -68,140 +79,262 @@ def encode_clip(engine, path):
     return enc
 
 
-def mean_pool_similarity(query, templates):
-    q = torch.nn.functional.normalize(query.float().mean(0), dim=0)
-    return torch.stack([torch.nn.functional.normalize(t.float().mean(0), dim=0) @ q for t in templates])
+class Sweep:
+    """Generic scores + the DTW matrix; builds evidence inputs for (query, profile takes) without re-running DTW."""
+    def __init__(self, clips, inventory):
+        self.c, self.inv = clips, inventory
+        self.base = np.array([[c["base"][p] for p in inventory] for c in clips])
+        self.y = np.array([inventory.index(c["phrase"]) for c in clips])
+        tpl = [c["enc"].to(torch.float16) for c in clips]  # profiles store float16 takes
+        self.S = torch.stack([dtw_similarity(c["enc"], tpl) for c in clips])
+        self._mu = {}
+
+    def idx(self, speaker, takes, phrases=None):
+        return [i for i, c in enumerate(self.c) if c["speaker"] == speaker and c["take"] in takes and (phrases is None or c["phrase"] in phrases)]
+
+    def mu(self, T):
+        k = tuple(T)
+        if k not in self._mu:
+            self._mu[k] = impostor_mean(self.S[T][:, T], [self.c[j]["phrase"] for j in T])
+        return self._mu[k]
+
+    def inputs(self, row, T):
+        """-> (mask, x): which phrases are enrolled and their best similarity minus the profile's impostor mean."""
+        best = best_per_phrase(row[T].tolist(), [self.c[j]["phrase"] for j in T])
+        mask, x, mu = np.zeros(len(self.inv)), np.zeros(len(self.inv)), self.mu(T)
+        for p, s in best.items():
+            mask[self.inv.index(p)] = 1.0; x[self.inv.index(p)] = s - mu
+        return mask, x
 
 
-def top1(base, sims, w):
-    """base: {phrase: model log-lik}; sims: {phrase: similarity}; same centring as Profile.bonus."""
-    mean = sum(sims.values()) / len(sims)
-    return max(base, key=lambda p: base[p] + w * (sims[p] - mean))
-
-
-def confidence(base, sims, w):
-    """Top-1 softmax probability, as PhraseDecoder reports it (no context prior)."""
-    mean = sum(sims.values()) / len(sims)
-    x = np.array([base[p] + w * (sims[p] - mean) for p in base])
-    e = np.exp(x - x.max())
-    return float(e.max() / e.sum())
-
-
-def best_sims(enc, takes, sim_fn):
-    flat = [(p, t) for p, ts in takes.items() for t in ts]
-    out = {}
-    for (p, _), s in zip(flat, sim_fn(enc, [t for _, t in flat]).tolist()):
-        out[p] = max(out.get(p, float("-inf")), s)
+def protocols(sw, speakers, s, k_max):
+    """[(query index, profile take indices, protocol)] with speaker s as the test speaker."""
+    inv, test = sw.inv, [i for i, c in enumerate(sw.c) if c["speaker"] == s and c["take"] > k_max]
+    out = []
+    for k in range(1, k_max + 1):
+        T = sw.idx(s, range(1, k + 1))
+        out += [(q, T, f"all K={k}") for q in test]
+    for half in (inv[:len(inv) // 2], inv[len(inv) // 2:]):
+        T = sw.idx(s, (1, 2), half)
+        out += [(q, T, "half: enrolled phrases" if sw.c[q]["phrase"] in half else "half: unenrolled phrases") for q in test]
+    for q in test:
+        out.append((q, sw.idx(s, (1, 2), [p for p in inv if p != sw.c[q]["phrase"]]), "one phrase not enrolled"))
+    for a in speakers:
+        if a != s:
+            out += [(q, sw.idx(a, range(1, k_max + 1)), "other speaker's profile") for q in test]
     return out
+
+
+def fit(insts):
+    """(base, mask, x, label) instances -> (slope, offset) minimising the mean log-loss of the decoder's posterior
+    softmax(base + mask * (slope * x - offset)). Convex in (slope, offset), so L-BFGS finds the optimum."""
+    B, M, X = (torch.tensor(np.stack([i[k] for i in insts])) for k in range(3))
+    Y = torch.tensor([i[3] for i in insts])
+    th = torch.zeros(2, dtype=torch.float64, requires_grad=True)
+    opt = torch.optim.LBFGS([th], max_iter=500, line_search_fn="strong_wolfe")
+    def closure():
+        opt.zero_grad()
+        loss = F.cross_entropy(B + M * (th[0] * X - th[1]), Y)
+        loss.backward()
+        return loss
+    opt.step(closure)
+    return tuple(th.detach().tolist())
+
+
+def scores(base, mask, x, slope, offset):
+    return base + mask * (slope * x - offset)
+
+
+def posterior(sc):
+    e = np.exp(sc - sc.max())
+    return e / e.sum()
+
+
+def summary(rows):
+    """rows: [(scores, label)] -> accuracy, ECE, confident errors, share of close decisions."""
+    ok, conf, margin = [], [], []
+    for sc, y in rows:
+        pr = posterior(sc); o = np.sort(sc)
+        ok.append(pr.argmax() == y); conf.append(pr.max()); margin.append(o[-1] - o[-2])
+    ok, conf, margin = np.array(ok), np.array(conf), np.array(margin)
+    b = np.minimum((conf * 10).astype(int), 9)
+    ece = sum(abs(ok[b == k].mean() - conf[b == k].mean()) * (b == k).sum() for k in range(10) if (b == k).any()) / len(ok)
+    return {"n": len(ok), "acc": ok.mean(), "ece": ece, "wrong": int((~ok).sum()), "w6": int((~ok & (conf >= 0.6)).sum()),
+            "w9": int((~ok & (conf >= 0.9)).sum()), "close": (margin < 2.0).mean(), "ok": ok, "conf": conf}
+
+
+def context_flips(rows, inv):
+    """How often a nurse question naming the runner-up flips the decision, and how often one naming the true phrase
+    fixes a wrong decision (the real ContextStore prior, gamma 1)."""
+    ctx = ContextStore()
+    def prior_for(q):
+        ctx.update(last_prompt=q)
+        return np.array([r["prior"] for r in ctx.log_prior(inv)])
+    flips = fixes = wrong = 0
+    for sc, y in rows:
+        o = np.argsort(-sc)
+        flips += (sc + prior_for(f"Is it {inv[o[1]].lower()}?")).argmax() != o[0]
+        if o[0] != y:
+            wrong += 1
+            fixes += (sc + prior_for(f"Is it {inv[y].lower()}?")).argmax() == y
+    return flips / len(rows), fixes, wrong
+
+
+def median_ms(f, n=5):
+    ts = []
+    for _ in range(n):
+        t = time.time(); f(); ts.append(time.time() - t)
+    return 1000 * float(np.median(ts))
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--miracl")
     ap.add_argument("--manifest")
-    ap.add_argument("--enroll", default="1,2,3", help="numbers of enrollment takes per phrase to evaluate")
+    ap.add_argument("--kmax", type=int, default=3, help="largest number of enrollment takes per phrase (tests use later takes)")
     ap.add_argument("--tag", default="miracl")
     ap.add_argument("--device", default="mps")
     a = ap.parse_args()
+    lock = open(os.path.expanduser("~/.cache/silent_running/smoke.lock"), "w")  # same machine-wide lock as smoke.py (8 GB RAM)
+    print("waiting for the machine-wide lock ...", flush=True)
+    fcntl.flock(lock, fcntl.LOCK_EX)
+    print(f"lock acquired, load {os.getloadavg()[0]:.1f}", flush=True)
     clips, inventory = miracl_clips(os.path.expanduser(a.miracl)) if a.miracl else manifest_clips(a.manifest)
-    ks = [int(k) for k in a.enroll.split(",")]
     engine = VSREngine(device=a.device)
     engine.warmup()
 
     t0 = time.time()
     dropped = []
-    for i, c in enumerate(clips):
+    for c in clips:
         c["enc"] = encode_clip(engine, c["path"])
         if c["enc"] is None:
             dropped.append(c["path"]); continue
         c["base"] = {r["phrase"]: r["score"] for r in engine.score_phrases(c["enc"], inventory)}
-        if i % 50 == 0:
-            print(f"[{i}/{len(clips)}] {time.time() - t0:.0f}s", flush=True)
+        c["no_speech"] = not engine.ctc_greedy(c["enc"]).strip()  # the server's "no mouth movement" gate
     clips = [c for c in clips if c["enc"] is not None]
-    print(f"encoded {len(clips)} clips, dropped {len(dropped)} (face not tracked): {dropped[:5]}")
-
+    print(f"encoded + scored {len(clips)} clips in {time.time() - t0:.0f}s, dropped {len(dropped)} (face not tracked): {dropped[:5]}", flush=True)
+    t0 = time.time()
+    sw = Sweep(clips, inventory)
+    print(f"DTW matrix {tuple(sw.S.shape)} in {time.time() - t0:.0f}s", flush=True)
     speakers = sorted({c["speaker"] for c in clips})
-    test = [c for c in clips if c["take"] > max(ks)]
-    lines = [f"# Enrollment eval: {a.tag}", "",
-             f"{len(speakers)} speakers, {len(inventory)}-phrase inventory, test = takes > {max(ks)} of every phrase "
-             f"({len(test)} clips, identical for every K). Generic = VSR log-likelihood only.", ""]
+    inst = lambda q, T: (sw.base[q], *sw.inputs(sw.S[q], T), sw.y[q])
 
-    # similarities for every (K, test clip) under both similarity functions
-    sims = {}
-    for method, fn in (("dtw", dtw_similarity), ("meanpool", mean_pool_similarity)):
-        for k in ks:
-            for s in speakers:
-                takes = defaultdict(list)
-                for c in clips:
-                    if c["speaker"] == s and c["take"] <= k:
-                        takes[c["phrase"]].append(c["enc"])
-                for c in test:
-                    if c["speaker"] == s:
-                        sims[method, k, id(c)] = best_sims(c["enc"], takes, fn)
-
-    def acc(method, k, w, spk):
-        cs = [c for c in test if c["speaker"] in spk]
-        return sum(top1(c["base"], sims[method, k, id(c)], w) == c["phrase"] for c in cs) / max(len(cs), 1)
-
-    folds = [speakers[0::2], speakers[1::2]]
-    chosen = {}
-    lines += ["| similarity | K takes | generic top-1 | enrolled top-1 (CV weight) | prototype only | weights chosen per fold |", "|---|---|---|---|---|---|"]
-    for method in ("dtw", "meanpool"):
-        for k in ks:
-            correct, ws = 0, []
-            for i, f in enumerate(folds):
-                other = folds[1 - i]
-                w = max(WEIGHTS, key=lambda w: acc(method, k, w, other))
-                ws.append(w)
-                correct += acc(method, k, w, f) * sum(c["speaker"] in f for c in test)
-            chosen[method, k] = ws
-            lines.append(f"| {method} | {k} | {acc(method, k, 0, speakers):.3f} | {correct / len(test):.3f} | "
-                         f"{acc(method, k, 1e6, speakers):.3f} | {ws} |")
-    lines += ["", "Top-1 over all speakers by weight (DTW):", "", "| K | " + " | ".join(f"w={w}" for w in WEIGHTS) + " |",
-              "|---|" + "---|" * len(WEIGHTS)]
-    for k in ks:
-        lines.append(f"| {k} | " + " | ".join(f"{acc('dtw', k, w, speakers):.3f}" for w in WEIGHTS) + " |")
-    k = max(ks)
-    w = max(WEIGHTS, key=lambda w: acc("dtw", k, w, speakers))
-    lines += ["", f"Per speaker (DTW, K = {k}, w = {w}: the best weight over ALL speakers, i.e. in-sample; the CV column above is the honest number):", "",
-              "| speaker | test clips | generic | enrolled |", "|---|---|---|---|"]
+    # ---- leave-one-speaker-out fit and held-out scores
+    per_spk = {s: [(inst(q, T), tag) for q, T, tag in protocols(sw, speakers, s, a.kmax)] for s in speakers}
+    held, folds = defaultdict(list), []
     for s in speakers:
-        lines.append(f"| {s} | {sum(c['speaker'] == s for c in test)} | {acc('dtw', k, 0, [s]):.3f} | {acc('dtw', k, w, [s]):.3f} |")
+        th = fit([i for o in speakers if o != s for i, tag in per_spk[o] if tag in TRAIN])
+        folds.append(th)
+        for i, tag in per_spk[s]:
+            held[tag].append((i, th))
+    final = fit([i for s in speakers for i, tag in per_spk[s] if tag in TRAIN])
 
-    lines += ["", f"Confidence (top-1 softmax, K = {k}): server thresholds are 0.5 for a critical alert and 0.6 for history.", "",
-              "| | mean conf when right | mean conf when wrong | wrong with conf >= 0.5 | wrong with conf >= 0.6 |", "|---|---|---|---|---|"]
-    for label, wt in (("generic", 0), (f"enrolled w={w}", w)):
-        rows = [(top1(c["base"], sims["dtw", k, id(c)], wt) == c["phrase"], confidence(c["base"], sims["dtw", k, id(c)], wt)) for c in test]
-        right, wrong = [cf for ok, cf in rows if ok], [cf for ok, cf in rows if not ok]
-        lines.append(f"| {label} | {np.mean(right):.2f} ({len(right)}) | {np.mean(wrong) if wrong else float('nan'):.2f} ({len(wrong)}) | "
-                     f"{sum(cf >= 0.5 for cf in wrong)} | {sum(cf >= 0.6 for cf in wrong)} |")
+    n_takes = max(c["take"] for c in clips)
+    L = [f"# Enrollment eval: {a.tag}", "",
+         f"Data: {len(speakers)} speakers x {len(inventory)} phrases x {n_takes} takes ({len(clips)} clips), every take of a speaker from one "
+         f"recording session (so cross-session drift is not measured). Test = takes {a.kmax + 1}-{n_takes} of every phrase; profiles use earlier takes.",
+         "", "Evidence for an enrolled phrase = SLOPE * (best DTW similarity - the profile's impostor mean) - OFFSET, added to the VSR "
+         "log-likelihood; unenrolled phrases get 0. (SLOPE, OFFSET) are fitted by minimising the log-loss of the decoder's posterior "
+         f"on the other {len(speakers) - 1} speakers' {', '.join(TRAIN)} instances; every number below is on the held-out speaker.", "",
+         "Fitted (SLOPE, OFFSET) per held-out speaker: " + ", ".join(f"{s} ({p:.1f}, {o:.1f})" for s, (p, o) in zip(speakers, folds)),
+         f"Fitted on all speakers (the defaults in enroll.py): SLOPE {final[0]:.1f}, OFFSET {final[1]:.1f} "
+         f"(enroll.py has SLOPE {SLOPE}, OFFSET {OFFSET}).", "",
+         "| protocol (held out) | n | generic top-1 | enrolled top-1 | ECE generic / enrolled | wrong with conf >= 0.6: generic / enrolled | "
+         "wrong with conf >= 0.9: generic / enrolled | decisions within 2 nats: generic / enrolled |", "|---|---|---|---|---|---|---|---|"]
+    own_g, own_e = [], []
+    for tag, rows in held.items():
+        g = summary([(b, y) for (b, m, x, y), th in rows])
+        e = summary([(scores(b, m, x, *th), y) for (b, m, x, y), th in rows])
+        L.append(f"| {tag} | {e['n']} | {g['acc']:.3f} | **{e['acc']:.3f}** | {g['ece']:.3f} / {e['ece']:.3f} | {g['w6']}/{g['wrong']} / {e['w6']}/{e['wrong']} | "
+                 f"{g['w9']} / {e['w9']} | {g['close']:.2f} / {e['close']:.2f} |")
+        if tag != "other speaker's profile":
+            own_g.append(g); own_e.append(e)
 
-    # real path check: engine.score_phrases with an active Profile must reproduce the sweep's choice
-    mism, t_bonus = 0, []
+    L += ["", "Reliability of the confidence (held out, own-profile protocols pooled):", "",
+          "| confidence | generic: n, accuracy, mean conf | enrolled: n, accuracy, mean conf |", "|---|---|---|"]
+    for lo, hi in BINS:
+        cells = []
+        for grp in (own_g, own_e):
+            ok = np.concatenate([g["ok"] for g in grp]); cf = np.concatenate([g["conf"] for g in grp]); m = (cf >= lo) & (cf < hi)
+            cells.append(f"{m.sum()}, {ok[m].mean():.3f}, {cf[m].mean():.2f}" if m.any() else "0")
+        L.append(f"| {lo:.1f}-{min(hi, 1.0):.1f} | {cells[0]} | {cells[1]} |")
+
+    L += ["", "Nurse question (real ContextStore prior, gamma 1), held out, own-profile protocols: \"Is it <runner-up>?\" flips the "
+          "decision / \"Is it <true phrase>?\" fixes a wrong decision:", ""]
+    own = [(i, th) for tag, rows in held.items() if tag != "other speaker's profile" for i, th in rows]
+    for label, rows in (("generic", [(b, y) for (b, m, x, y), th in own]), ("enrolled", [(scores(b, m, x, *th), y) for (b, m, x, y), th in own])):
+        f, fx, w = context_flips(rows, inventory)
+        L.append(f"- {label}: flips {f:.1%} of {len(rows)} decisions; fixes {fx} of {w} wrong decisions")
+
+    # ---- enrollment take gate (Enrollment.check): reject a take whose evidence for its own label is < 0
+    L += ["", f"Take gate (a new take of phrase X is rejected if the profile's evidence for X is < 0; needs an earlier take of X). "
+          f"Profile = take 1 of every phrase, candidate = take 2, final parameters:", ""]
+    unrel = []
+    for p in UNRELATED:
+        e = encode_clip(engine, os.path.join(ROOT, p))
+        if e is None:
+            L.append(f"- (skipped {p}: face not tracked)"); continue
+        unrel.append(dtw_similarity(e, [c["enc"].to(torch.float16) for c in clips]))
+    gen = junk = other = 0; n_gen = n_junk = n_other = 0
     for s in speakers:
-        prof = Profile(f"eval_{s}", weight=w)
-        for c in clips:
-            if c["speaker"] == s and c["take"] <= k:
-                prof.add(c["phrase"], c["enc"])
-        engine.profile = prof
-        for c in test:
-            if c["speaker"] != s:
-                continue
-            t = time.time(); prof.bonus(c["enc"], inventory); t_bonus.append(time.time() - t)
-            real = engine.score_phrases(c["enc"], inventory)[0]["phrase"]
-            mism += real != top1(c["base"], sims["dtw", k, id(c)], w)
-    engine.profile = None
-    lines += ["", f"Real-path check (engine.score_phrases with an active Profile, K={k}, w={w}): {mism} disagreements with the sweep "
-              f"over {len(test)} clips. Prototype scoring cost: median {1000 * np.median(t_bonus):.1f} ms per utterance "
-              f"({len(inventory)} phrases x {k} takes)."]
+        T = sw.idx(s, (1,))
+        for q in sw.idx(s, (2,)):
+            b, m, x, y = inst(q, T); ev = m * (final[0] * x - final[1])
+            gen += ev[y] < 0; n_gen += 1
+            junk += sum(ev[k] < 0 for k in range(len(inventory)) if k != y); n_junk += len(inventory) - 1
+        for row in unrel:
+            m, x = sw.inputs(row, T); ev = final[0] * x - final[1]
+            other += int(((ev < 0) & (m > 0)).sum()); n_other += int(m.sum())
+    L += [f"- genuine take 2 rejected: {gen}/{n_gen}", f"- take of another phrase, labelled as X: rejected {junk}/{n_junk}",
+          f"- unrelated speech ({len(unrel)} TED clips x every phrase label): rejected {other}/{n_other}",
+          f"- the \"no mouth movement\" gate (empty CTC greedy transcript), which every take passes first: rejects {sum(c['no_speech'] for c in clips)}/{len(clips)} genuine clips",
+          "- a first take of a phrase has nothing to compare with and is only checked for mouth movement (use /api/enroll/undo)."]
 
-    for n in (40 * 3, 204 * 2):
-        q, big = torch.randn(60, 768), [torch.randn(60, 768) for _ in range(n)]
-        t = time.time(); dtw_similarity(q, big); dt = time.time() - t
-        lines.append(f"Scaling (synthetic features): {n} templates, 60-frame (2.4 s) utterance and takes: {1000 * dt:.1f} ms.")
+    # ---- real path: PhraseDecoder + Profile (what the server runs), final parameters from enroll.py
+    dec = PhraseDecoder(engine, inventory, ContextStore())
+    mism, dconf, n = 0, 0.0, 0
+    for s in speakers:
+        for label, T in (("all", sw.idx(s, range(1, a.kmax + 1))), ("half", sw.idx(s, (1, 2), inventory[:len(inventory) // 2]))):
+            prof = Profile(f"eval_{s}_{label}")
+            for j in T:
+                prof.add(clips[j]["phrase"], clips[j]["enc"])
+            dec.profile = prof
+            for q in sw.idx(s, range(a.kmax + 1, n_takes + 1)):
+                b, m, x, y = inst(q, T)
+                pr = posterior(scores(b, m, x, SLOPE, OFFSET))
+                pd = dec.decode(clips[q]["enc"])
+                mism += pd["selected"] != inventory[int(pr.argmax())]; dconf = max(dconf, abs(pd["confidence"] - pr.max())); n += 1
+    dec.profile = None
+    L += ["", f"Real-path check (PhraseDecoder.decode with a real Profile, all-enrolled and half-enrolled, enroll.py parameters): "
+          f"{mism} disagreements with the sweep over {n} decisions, max confidence difference {dconf:.4f}."]
+
+    # ---- latency on real features (evidence and the whole PhraseDecoder.decode), under this script's lock
+    L += ["", f"Latency, real features (MIRACL takes as templates, slices of a TED encoding as queries), median of 5, load {os.getloadavg()[0]:.1f} at start:", "",
+          "| inventory | templates | query | evidence ms | decode ms without profile | decode ms with profile |", "|---|---|---|---|---|---|"]
+    ted = encode_clip(engine, os.path.join(ROOT, "data/samples/ted1_12s.mp4"))
+    icu = load_phrases()
+    rng = np.random.default_rng(0)
+    for n_ph, reps in ((40, 3), (len(icu), 2)):
+        inv = icu[:n_ph]
+        prof = Profile("latency")
+        for p in inv:
+            for _ in range(reps):
+                prof.add(p, clips[int(rng.integers(len(clips)))]["enc"])
+        dec = PhraseDecoder(engine, inv, ContextStore())
+        for secs in (1, 2, 4):
+            q = ted[:25 * secs]
+            t_ev = median_ms(lambda: prof.evidence(q, inv))
+            dec.profile = None; t0d = median_ms(lambda: dec.decode(q))
+            dec.profile = prof; t1d = median_ms(lambda: dec.decode(q))
+            L.append(f"| {n_ph} phrases | {len(prof.phrases)} | {secs} s ({q.shape[0]} frames) | {t_ev:.0f} | {t0d:.0f} | {t1d:.0f} |")
+        t = time.time(); prof.save(); t_save = time.time() - t
+        L.append(f"| {n_ph} phrases | profile save (per take) | {os.path.getsize(prof.path) / 1e6:.0f} MB | {1000 * t_save:.0f} ms | | |")
+        os.remove(prof.path)
+    L.append(f"\nLoad at end: {os.getloadavg()[0]:.1f}.")
+
     out = os.path.join(ROOT, "results", f"enroll_{a.tag}.md")
-    open(out, "w").write("\n".join(lines) + "\n")
-    print("\n".join(lines))
+    open(out, "w").write("\n".join(L) + "\n")
+    print("\n".join(L))
     print("wrote", out)
 
 
