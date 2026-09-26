@@ -253,7 +253,8 @@ function handle(m){
     fetch('/api/state').then(r=>r.json()).then(s=>{$('#engine').textContent=`${s.engine.model} · ${phrases.length} phrases`;});}
   else if(m.type==='status'){setState(m.status,m.stage);if(m.status==='processing'&&m.stage==='crop'){$('#err').textContent='';}}
   else if(m.type==='raw'){$('#raw').innerHTML=`<span class="lbl">raw (CTC greedy)</span>${m.text||'<span class="small">(nothing)</span>'}`;$('#nbest').innerHTML='';$('#lat').textContent=`crop ${(m.latency.crop*1000).toFixed(0)} ms · encode ${(m.latency.encode*1000).toFixed(0)} ms · ${m.n_frames} frames (${m.duration.toFixed(1)} s)`;}
-  else if(m.type==='result'){last=m;render(m);if($('#autospeak').checked&&!(m.mode==='open'&&$('#llm').checked)&&!m.critical)speak(m.selected);}
+  else if(m.type==='result'){last=m;if(m.action==='answer'||m.action==='none')return;render(m);if($('#autospeak').checked&&!(m.mode==='open'&&$('#llm').checked)&&!m.critical&&(m.action||'speak')==='speak')speak(m.selected);}
+  else if(m.type==='confirm'){renderConfirm(m);}
   else if(m.type==='alert'){showAlert(m);}
   else if(m.type==='nbest'){renderNbest(m.nbest);}
   else if(m.type==='llm'){renderLLM(m);}
@@ -337,22 +338,29 @@ function renderLLM(m){
   if($('#autospeak').checked)speak((m.changed&&m.accepted)?m.corrected:last.selected);
 }
 function wordDiff(a,b){const A=a.split(' '),B=b.split(' ');let i=0;while(i<A.length&&i<B.length&&A[i].toLowerCase()===B[i].toLowerCase())i++;let j=0;while(j<A.length-i&&j<B.length-i&&A[A.length-1-j].toLowerCase()===B[B.length-1-j].toLowerCase())j++;const x=A.slice(i,A.length-j).join(' ')||'∅',y=B.slice(i,B.length-j).join(' ')||'∅';return `“${x}” → “${y}”`;}
+function renderConfirm(m){const bt=$('#bigtext'),c=$('#conf');
+  if(m.state==='asking'){bt.textContent=`SOUNDS LIKE: ${m.candidate.toUpperCase()}?`;c.innerHTML=`<span class="pill warn">asking · attempt ${m.attempt} · nod = yes, shake = no · nurse: Y / N</span>`;}
+  else if(m.state==='confirmed'){bt.textContent=m.candidate.toUpperCase();c.innerHTML=`<span class="pill ok">confirmed (${m.by}) in ${m.latency.answer.toFixed(1)} s</span>`;}
+  else if(m.state==='rejected'&&m.say){bt.textContent='—';c.innerHTML=`<span class="pill warn">not “${m.candidate}” · please mouth it again</span>`;}
+  else if(m.state==='timeout'){bt.textContent='—';c.innerHTML=`<span class="pill warn">no answer to “${m.candidate}” · nothing spoken</span>`;}
+  if(m.say&&$('#autospeak').checked)speak(m.say,{plain:true,onend:m.state==='asking'?()=>send({cmd:'prompt_played',utt_id:m.utt_id,attempt:m.attempt}):null});}
 function pretty(s){s=(s||'').toLowerCase().replace(/\bi\b/g,'I').replace(/\bi'/g,"I'");return s.charAt(0).toUpperCase()+s.slice(1)}
 // ---------- voice
 function loadVoices(){voices.list=speechSynthesis.getVoices().filter(v=>v.lang.startsWith('en'));}
 speechSynthesis.onvoiceschanged=()=>{loadVoices();loadCloned();};loadVoices();setTimeout(loadCloned,500);
 let cloned=[];const player=new Audio();
-function speakBrowser(text){speechSynthesis.cancel();const u=new SpeechSynthesisUtterance(text);const v=voices.list.find(v=>v.name==='Samantha')||voices.list[0];if(v)u.voice=v;speechSynthesis.speak(u);$('#err').textContent='ElevenLabs unavailable, used browser voice';}
-function speak(text,opts){if(!text)return;const sel=$('#voice').value;opts=opts||{};
+let curU=null;
+function speakBrowser(text,onend){if(curU)curU.onend=null;speechSynthesis.cancel();const u=curU=new SpeechSynthesisUtterance(text);u.onend=onend||null;const v=voices.list.find(v=>v.name==='Samantha')||voices.list[0];if(v)u.voice=v;speechSynthesis.speak(u);$('#err').textContent='ElevenLabs unavailable, used browser voice';}
+function speak(text,opts){if(!text)return;const sel=$('#voice').value;opts=opts||{};player.onended=opts.onend||null;
   if(sel.startsWith('clone:')){const sp=sel.slice(6);player.pause();
     const ex=(opts.expression)||(last&&last.expression)||{emotion:'neutral',intensity:0};const tm=(last&&last.timing)||{};
     let emo=opts.emotion||ex.emotion||'neutral',inten=opts.intensity!=null?opts.intensity:(ex.intensity||0),rate=tm.rate||1;
     if(emo==='urgent'){emo='angry';inten=0.7;rate=1.1;}
-    const expressive=$('#expressive').checked;
+    const expressive=$('#expressive').checked&&!opts.plain;
     const url=expressive?`/api/say?text=${encodeURIComponent(text)}&emotion=${emo}&intensity=${inten}&rate=${rate}&voice=${encodeURIComponent(sp)}&utt_id=${last?last.utt_id:0}&_=${Date.now()}`:`/api/tts?text=${encodeURIComponent(text)}&voice=${encodeURIComponent(sp)}&_=${Date.now()}`;
-    player.src=url;player.onerror=()=>{speakBrowser(text);};player.play().catch(e=>{if(e&&e.name==='NotAllowedError'){$('#err').textContent='Click anywhere on the page once to enable audio, then try again.';}else speakBrowser(text);});
+    player.src=url;player.onerror=()=>{speakBrowser(text,opts.onend);};player.play().catch(e=>{if(e&&e.name==='NotAllowedError'){$('#err').textContent='Click anywhere on the page once to enable audio, then try again.';}else speakBrowser(text,opts.onend);});
     if(!$('#conf').querySelector('.voicepill'))$('#conf').insertAdjacentHTML('beforeend',`<span class="pill ctx voicepill">voice: ${sp}</span>`);}
-  else speakBrowser(text);}
+  else speakBrowser(text,opts.onend);}
 function loadCloned(){fetch('/api/voices').then(r=>r.json()).then(j=>{cloned=j.voices||[];const sel=$('#voice');const add=(val,label)=>{if(![...sel.options].some(o=>o.value===val)){const o=document.createElement('option');o.value=val;o.textContent=label;sel.insertBefore(o,sel.firstChild);}};(j.stock||[]).slice().reverse().forEach(v=>add('clone:'+v.name,`☁ ${v.name} (ElevenLabs)`));cloned.forEach(v=>add('clone:'+v.speaker,`🎙 ${v.speaker} (my voice)`));if(j.selected&&j.available){sel.value='clone:'+j.selected;}});}
 $('#voice').addEventListener('change',e=>{const v=e.target.value;send({cmd:'settings',voice:v.startsWith('clone:')?v.slice(6):null});});
 // ---------- listen button
@@ -362,6 +370,7 @@ function up(e){if(!held)return;held=false;lb.classList.remove('on');send({cmd:'s
 lb.addEventListener('mousedown',down);lb.addEventListener('touchstart',down,{passive:false});
 window.addEventListener('mouseup',up);lb.addEventListener('touchend',up);
 window.addEventListener('keydown',e=>{if(e.code==='Space'&&!e.repeat&&!/INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName)){down(e)}});
+window.addEventListener('keydown',e=>{if((e.key==='y'||e.key==='n')&&!/INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName))send({cmd:'answer',value:e.key==='y'?'yes':'no'});});
 window.addEventListener('keyup',e=>{if(e.code==='Space'&&!/INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName)){up(e)}});
 // ---------- nurse
 $('#nurse').onclick=()=>{const b=$('#nurse');b.classList.add('on');b.textContent='🎤 Listening to the nurse… (5 s)';send({cmd:'nurse',seconds:5});setTimeout(()=>{b.classList.remove('on');b.textContent="🎤 Nurse: I'm about to speak (5 s)";},6500);};
