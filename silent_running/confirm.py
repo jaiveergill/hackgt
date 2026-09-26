@@ -15,21 +15,24 @@ SPEAK_CONF = float(os.environ.get("CONFIRM_SPEAK_CONF", 0.6))  # at or above thi
 MIN_ALT_CONF = 0.05          # alternatives below this probability are not offered
 MAX_ATTEMPTS = 3             # candidates offered before giving up
 TIMEOUT = float(os.environ.get("CONFIRM_TIMEOUT", 4.0))  # s the patient has to answer once the prompt has played
-PROMPT_WAIT = 10.0           # s allowed for the prompt to be synthesized and played before the answer window starts anyway
+# s allowed for the prompt to play before the answer window starts anyway (nobody reported playback end). Prompts use the
+# local system voice (no network): over the phrase bank "Sounds like: X?" lasts 2.2 s median, 3.2 s max (say -v Daniel),
+# and a played() report arriving within PROMPT_WAIT + TIMEOUT still restarts the window.
+PROMPT_WAIT = 4.0
 SIGNAL_CONF = 0.5            # a gesture must be at least this confident to count as an answer
 
 
 def answer_from_signal(sig):
     """Map a `signal` event to "yes" / "no" / None."""
-    if float(sig.get("confidence", 0.0)) < SIGNAL_CONF:
+    if sig["confidence"] < SIGNAL_CONF:  # validated by the server (server._signal_problem)
         return None
     kind, value = sig.get("kind"), sig.get("value")
     if kind == "nod":
         return "yes"
     if kind == "shake":
         return "no"
-    if kind == "thumb":
-        return {"up": "yes", "down": "no"}.get(value)
+    if kind == "thumb" and value in ("up", "down"):
+        return "yes" if value == "up" else "no"
     if kind == "blink_code" and value in ("yes", "no"):
         return value
     return None
@@ -102,15 +105,16 @@ class ConfirmLoop:
         """The prompt for (utt_id, attempt) finished playing: the patient now has TIMEOUT s to answer."""
         with self.lock:
             c = self.cur
-            if c is None or c["utt_id"] != utt_id or c["i"] + 1 != attempt:
-                return False
+            if c is None or c["utt_id"] != utt_id or c["i"] + 1 != attempt or "t_played" in c:
+                return False  # stale, or a second UI tab reporting the same prompt: only the first report starts the window
             c["t_played"] = time.time()
             self._arm(self.timeout)
             return True
 
-    def cancel(self, reason="cancelled"):
+    def cancel(self, reason="cancelled", ts=None):
+        """End the pending question. With `ts` (when the superseding utterance ended), only a question asked before then."""
         with self.lock:
-            if self.cur:
+            if self.cur and (ts is None or ts >= self.cur["t_ask"]):
                 self._event("rejected", reason=reason)
                 self.cur = None
 
@@ -120,6 +124,7 @@ class ConfirmLoop:
         cand = c["alts"][c["i"]]["text"]
         say = f"Sounds like: {cand}?"
         c["t_ask"] = time.time()
+        c.pop("t_played", None)
         self._arm(PROMPT_WAIT + self.timeout)
         self._event("asking", candidate=cand, confidence=c["alts"][c["i"]]["confidence"], say=say, timeout=self.timeout,
                     latency={"since_utterance": round(c["t_ask"] - c["t0"], 3)}, remaining=[a["text"] for a in c["alts"][c["i"] + 1:]])
