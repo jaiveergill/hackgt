@@ -36,27 +36,32 @@ function meta(m){
     t.textContent=(m.listening?`listening · ${m.n_frames} frames`:`tracking mouth · ${q}`)+` · ${(m.fps||0).toFixed(0)} fps`+(m.auto?` · motion ${m.energy.toFixed(1)}/${m.noise.toFixed(1)}`:'');}
   $('#camwrap').classList.toggle('listening',!!m.listening);
   setMouthing(mouthingSig||!!m.mouth_active,false);
+  showHands(m.hands);
   drawOverlay(m);
 }
+function showHands(st){  // "on" | "off: <reason>" (e.g. a missing model), so a disabled hand tracker is visible to the operator
+  const b=$('#hands');b.hidden=st==null;if(st==null)return;const on=st==='on';
+  b.className='badge handsbadge'+(on?'':' off');b.textContent=`hand signals ${st}`;
+  $$('#sig-fingers,#sig-hand').forEach(e=>{e.classList.toggle('off',!on);e.title=on?'':`hand signals ${st}`;});}
 function drawOverlay(m){
   const g=$('#ovbox');
   if(!m.face||!m.bbox){g.innerHTML='';return;}
   const W=m.frame_w||640,H=m.frame_h||480;$('#overlay').setAttribute('viewBox',`0 0 ${W} ${H}`);
-  let [x1,y1,x2,y2]=m.bbox;[x1,x2]=[W-x2,W-x1];  // the preview is mirrored, the bbox is not
+  let [x1,y1,x2,y2]=m.bbox;if(m.source&&m.source.mirror)[x1,x2]=[W-x2,W-x1];  // a mirrored preview (webcam): the bbox is not
   const L=Math.min(x2-x1,y2-y1)*.28,c=m.listening||m.mouth_active?'#5aa9ff':'#3ddc97';
   const p=`M${x1},${y1+L}V${y1}H${x1+L}M${x2-L},${y1}H${x2}V${y1+L}M${x2},${y2-L}V${y2}H${x2-L}M${x1+L},${y2}H${x1}V${y2-L}`;
   g.innerHTML=`<path d="${p}" stroke="${c}" style="vector-effect:non-scaling-stroke;stroke-width:3.5"/><text class="lbl" x="${x1}" y="${y1-W/80}" fill="${c}" font-size="${W/42}">${m.listening?'READING LIPS':'MOUTH'}</text>`;
 }
 
 // ---------- status
-let eyebrowBefore='';  // restored when processing ends without replacing the hero (a quiet answer, an error)
+let heroBefore={state:'idle',eyebrow:''};  // restored when processing ends without anything replacing the hero (a quiet answer, an error)
 function setState(s,extra){
   const el=$('#state');el.className='state '+s;el.textContent=(s==='nurse_listening'?'nurse speaking':s)+(extra?' · '+extra:'');
   const p=$('#statuspill');p.className='statuspill '+s;p.querySelector('span').textContent=s==='nurse_listening'?'nurse speaking':s;
   const h=$('#hero');
   if(s==='listening'&&h.dataset.state!=='confirm'){$('#eyebrow').textContent='Listening · mouth the phrase';}
-  else if(s==='processing'){if(h.dataset.state!=='processing')eyebrowBefore=$('#eyebrow').textContent;h.dataset.state='processing';$('#eyebrow').textContent='Reading lips…';}
-  else if(s==='idle'&&h.dataset.state==='processing'){h.dataset.state=cf?'confirm':(last?'result':'idle');$('#eyebrow').textContent=eyebrowBefore;}  // an open question stays open: that take may have been its answer
+  else if(s==='processing'){if(h.dataset.state!=='processing')heroBefore={state:h.dataset.state,eyebrow:$('#eyebrow').textContent};h.dataset.state='processing';$('#eyebrow').textContent='Reading lips…';}
+  else if(s==='idle'&&h.dataset.state==='processing'){h.dataset.state=heroBefore.state;$('#eyebrow').textContent=heroBefore.eyebrow;}
 }
 
 // ---------- event dispatch
@@ -76,7 +81,7 @@ function handle(m){
   else if(m.type==='llm'){renderLLM(m);}
   else if(m.type==='delivery'){const d=$('#delivrep');if(d){d.innerHTML=`delivered <b>${esc(m.emotion)}</b>${m.intensity?` ${(m.intensity*100).toFixed(0)}%`:''} · ${esc(m.model)}${m.tag?` · tag <code>${esc(m.tag)}</code>`:''} · stability ${esc(m.stability)} · speed ${m.rate.toFixed(2)}x · synth ${m.cached?'cached':esc(m.t_synth)+' s'}${m.retime&&m.retime.applied?` · retimed (global ${esc(m.retime.global)}x)`:(m.retime&&m.retime.reason?` · no retime: ${esc(m.retime.reason)}`:'')} · total ${esc(m.total)} s`;}renderAudioStrip(m.retime);}
   else if(m.type==='log'){addLog(m.entry);}
-  else if(m.type==='error'){toast(m.message);setState('idle');}
+  else if(m.type==='error'){toast(m.message);}  // a failed decode comes with its own idle status
   else if(m.type==='context'){applyCtx(m.context);}
   else if(m.type==='state'){mode=m.state.mode;syncMode();}
   else if(m.type==='prewarmed'){$('#clonestat').textContent=`voice “${m.speaker}” ready · ${m.n} phrase variants cached`;}
@@ -131,7 +136,7 @@ function renderHero(m){
   heroSet('result','lips');setBig(m.selected);setRing(m.confidence);$('#hero').classList.toggle('weak',m.mode==='phrase'&&m.in_inventory===false);
   $('#eyebrow').textContent=`${SRC_LABEL.lips} · ${m.mode==='open'?'open vocabulary':'phrase match'} · ${ms(m.latency.total)}`;
   $('#reason').textContent=m.mode==='phrase'?(m.context_changed_choice?`Context changed the choice: the visual top was “${m.visual_top}”.`:''):'';
-  $('#alts').innerHTML='';stopCountdown();cf=null;
+  $('#alts').innerHTML='';
   const conf=$('#conf');let pills='';const c=m.confidence;
   pills+=`<span class="pill ${c>0.7?'ok':'warn'}">lips ${fmtPct(c)}</span>`;
   if(m.critical)pills+=`<span class="pill bad">CRITICAL</span>`;
@@ -150,30 +155,31 @@ function renderHero(m){
     top.forEach((r,i)=>{const b=document.createElement('button');if(i===0)b.className='top';
       b.innerHTML=`<span>${esc(r.phrase)}${r.reasons.length?`<b class="why">+${r.prior.toFixed(1)} ${esc(r.reasons.join(', '))}</b>`:''}</span><small>${fmtPct(r.final_prob)}</small><span class="bars"><i class="bv" style="width:${(r.vsr_prob/mb*100).toFixed(1)}%"></i><i class="bc" style="width:${(r.final_prob/mb*100).toFixed(1)}%"></i></span>`;
       b.title=`visual-only ${fmtPct(r.vsr_prob)} → with context ${fmtPct(r.final_prob)}`;
-      b.onclick=()=>{speak(r.phrase,{utt_id:m.utt_id});send({cmd:'confirm',text:r.phrase});setBig(r.phrase);};dym.appendChild(b);});
+      b.onclick=()=>pick(r.phrase,m.utt_id);dym.appendChild(b);});
   }else{
     m.nbest.slice(0,4).forEach((h,i)=>{const b=document.createElement('button');if(i===0)b.className='top';b.innerHTML=`<span>${esc(pretty(h.text))||'(empty)'}</span><small>${fmtPct(h.prob)}</small>`;b.onclick=()=>speak(pretty(h.text),{utt_id:m.utt_id});dym.appendChild(b);});
   }
   latResult(m);
   const L=m.latency;$('#vitals').innerHTML=`<span>server <b>${ms(L.total)}</b></span><span>face <b>${esc((m.expression||{}).emotion||'neutral')}</b></span><span>mouthed <b>${m.timing?m.timing.duration.toFixed(2)+' s':'—'}</b></span><span>mode <b>${esc(m.mode)}</b></span><span>utt <b>#${m.utt_id}</b></span>`;
 }
+function pick(text,uid){speak(text,{utt_id:uid});send({cmd:'confirm',text});setBig(text);}  // the nurse taps a candidate: say it, record it
 function onDecision(d){
   latMark(d.utt_id,'decision');
   $('#decision').innerHTML=`<div class="dec"><div class="t">${esc(d.text)} <span class="pill">${esc(d.source)}</span> <span class="pill">${esc(d.action)}</span></div><div class="small">${esc(d.reason)}</div>
     <table><tr><td>utt</td><td>#${d.utt_id}</td></tr><tr><td>confidence</td><td>${fmtPct(d.confidence)}</td></tr><tr><td>provider</td><td>${esc(d.provider)}</td></tr>${(d.alternatives||[]).map(a=>`<tr><td>alt</td><td>${esc(a.text)} · ${fmtPct(a.confidence)}</td></tr>`).join('')}</table></div>`;
   if(d.action==='none')return;  // nothing to say (e.g. a yes/no that answered the open question): the hero keeps what it shows
   if(d.action==='speak'&&spoken[d.utt_id]===d.text)return;  // records a confirmation: the confirm event (or the critical alert) says it
-  if(cf&&cf.utt_id!==d.utt_id){stopCountdown();cf=null;}
+  const alts=(d.alternatives||[]).filter(a=>a.text!==d.text);  // the server's list starts with the pick itself
   heroSet('result',d.source);setBig(d.text);setRing(d.confidence);
   $('#eyebrow').textContent=`${SRC_LABEL[d.source]||d.source}${d.provider?' · '+d.provider:''}`;
   $('#reason').textContent=d.reason||'';
   if(!last||d.utt_id!==last.utt_id){  // no lip result behind this decision (gesture fast path): drop the previous utterance's evidence
     $('#conf').innerHTML='';const dym=$('#dym');dym.innerHTML='';
-    [{text:d.text,confidence:d.confidence},...(d.alternatives||[])].forEach((a,i)=>{const b=document.createElement('button');if(i===0)b.className='top';
-      b.innerHTML=`<span>${esc(a.text)}</span><small>${fmtPct(a.confidence)}</small>`;b.onclick=()=>{speak(a.text,{utt_id:d.utt_id});send({cmd:'confirm',text:a.text});setBig(a.text);};dym.appendChild(b);});
+    [{text:d.text,confidence:d.confidence},...alts].forEach((a,i)=>{const b=document.createElement('button');if(i===0)b.className='top';
+      b.innerHTML=`<span>${esc(a.text)}</span><small>${fmtPct(a.confidence)}</small>`;b.onclick=()=>pick(a.text,d.utt_id);dym.appendChild(b);});
   }
-  $('#alts').innerHTML=(d.alternatives||[]).length?'Also possible: '+d.alternatives.slice(0,3).map((a,i)=>`<span data-i="${i}" style="cursor:pointer">${esc(a.text)} ${fmtPct(a.confidence)}</span>`).join(' · '):'';
-  $$('#alts span').forEach(s=>s.onclick=()=>{const a=d.alternatives[+s.dataset.i];speak(a.text,{utt_id:d.utt_id});send({cmd:'confirm',text:a.text});setBig(a.text);});
+  $('#alts').innerHTML=alts.length?'Also possible: '+alts.slice(0,3).map((a,i)=>`<span data-i="${i}" style="cursor:pointer">${esc(a.text)} ${fmtPct(a.confidence)}</span>`).join(' · '):'';
+  $$('#alts span').forEach(s=>s.onclick=()=>pick(alts[+s.dataset.i].text,d.utt_id));
   if(d.action==='speak'&&!(last&&last.utt_id===d.utt_id&&last.critical))speakOnce(d.utt_id,d.text);  // a critical phrase is announced by its alert
 }
 
@@ -181,7 +187,7 @@ function onDecision(d){
 let cf=null;  // the open question {key,utt_id,anims}
 const isQuiet=m=>m.action==='answer'||m.action==='none';
 function onConfirm(c){
-  if(c.state==='asking'?(last&&c.utt_id<last.utt_id&&!isQuiet(last)):(!cf||cf.utt_id!==c.utt_id))return;  // stale: a newer utterance owns the hero
+  if(c.state!=='asking'&&(!cf||cf.utt_id!==c.utt_id))return;  // about a question this page is not showing; the server has one question at a time
   if(c.state==='asking'){
     heroSet('confirm');setBig(c.candidate,{question:true});if(c.confidence!=null)setRing(c.confidence);
     $('#eyebrow').textContent=`Checking with the patient · guess ${c.attempt}`;
@@ -192,7 +198,7 @@ function onConfirm(c){
       onend:()=>{send({cmd:'prompt_played',utt_id:c.utt_id,attempt:c.attempt});if(cf&&cf.key===key)startCountdown(c.timeout);}});
   }else if(c.state==='rejected'){
     if(c.reason){stopCountdown();cf=null;if($('#hero').dataset.state==='confirm')heroSet('result');}  // closed by the server, e.g. the nurse tapped a phrase
-    else if(c.say){stopCountdown();cf=null;heroIdle('Please mouth it again',`Not “${c.candidate}”`);if($('#autospeak').checked)sayConfirm(c);}  // the last guess
+    else if(c.say){endQuestion('Please mouth it again',`Not “${c.candidate}”`);if($('#autospeak').checked)sayConfirm(c);}  // the last guess
     else $('#confirmhint').textContent=`✗ Not “${c.candidate}” · trying the next guess`;
   }else if(c.state==='confirmed'){
     stopCountdown();cf=null;heroSet('confirmed');setBig(c.candidate);setRing(1);
@@ -200,15 +206,16 @@ function onConfirm(c){
     spoken[c.utt_id]=c.candidate;  // said here; say is null for a critical phrase, which its alert announces
     if(c.say&&$('#autospeak').checked)sayConfirm(c,{onstart:()=>latMark(c.utt_id,'audio')});
   }else if(c.state==='timeout'){
-    stopCountdown();cf=null;heroIdle('No answer',`Nothing spoken · “${c.candidate}” was not confirmed`);
+    endQuestion('No answer',`Nothing spoken · “${c.candidate}” was not confirmed`);
   }
 }
 function sayConfirm(c,opts){if(c.say_voice==='system')speakSystem(c.say,opts||{});else speak(c.say,{...opts,utt_id:c.utt_id});}
+function endQuestion(text,why){stopCountdown();cf=null;if($('#hero').dataset.state==='confirm')heroIdle(text,why);}  // a newer result may own the hero
 function heroIdle(text,why){heroSet('idle');setRing(null);const bt=$('#bigtext');bt.className='text placeholder';bt.textContent=text;$('#eyebrow').textContent=why;$('#reason').textContent='';$('#alts').innerHTML='';}
-function startCountdown(sec){stopCountdown();
+function startCountdown(sec){stopCountdown();$('#hero').classList.add('counting');  // hidden until then: unplayed, the server's window is longer
   cf.anims=[$('#cdfill').animate([{transform:'scaleX(1)'},{transform:'scaleX(0)'}],{duration:sec*1000,fill:'forwards'}),
     $('#ringcd').animate([{strokeDashoffset:0},{strokeDashoffset:276.5}],{duration:sec*1000,fill:'forwards'})];}
-function stopCountdown(){if(cf&&cf.anims)cf.anims.forEach(a=>a.cancel());}
+function stopCountdown(){if(cf&&cf.anims)cf.anims.forEach(a=>a.cancel());$('#hero').classList.remove('counting');}
 function answerQuestion(yes){send({cmd:'answer',value:yes?'yes':'no'});}  // the nurse answers for the patient; the server ignores it when nothing is asked
 $('#cyes').onclick=()=>answerQuestion(true);$('#cno').onclick=()=>answerQuestion(false);
 
@@ -226,16 +233,18 @@ function onSignal(s){
   else if(s.kind==='shake')setChip('head',`NO · shake${c}`);
   else if(s.kind==='blink_code')setChip('blink',`${esc(String(s.value).toUpperCase())}${c}`);
   else if(s.kind==='fingers')setChip('fingers',`${esc(s.value)}${c}`);
-  else if(s.kind==='thumb')setChip('hand',`Thumb ${s.value==='down'?'down':'up'}${c}`);
-  else if(s.kind==='point')setChip('hand',`Pointing${s.value&&s.value!==true?' · '+esc(s.value):''}${c}`);
+  else if(s.kind==='thumb'||s.kind==='point')setChip('hand',esc(handText(s.kind,s.value))+c);
   else if(s.kind==='pain')setPain(+s.value||0,true);
   else if(s.kind==='mouthing')setMouthing(!!s.value);
 }
+function handText(kind,v){  // plain text (escape before innerHTML); pointing directions are from the patient's side
+  return kind==='thumb'?`Thumb ${v==='down'?'down':'up'}`:`Pointing ${/^(left|right)$/.test(v)?"patient's "+v:v}`;}
 function nonverbalPills(nv){
   if(!nv)return '';const p=[];
   if(nv.head&&nv.head.value)p.push(`head: ${nv.head.value} ${fmtPct(nv.head.confidence||0)}`);
   if(nv.blink_code&&nv.blink_code.value)p.push(`blink: ${nv.blink_code.value}`);
   if(nv.fingers&&nv.fingers.value!=null)p.push(`fingers: ${nv.fingers.value}`);
+  ['thumb','point'].forEach(k=>{if(nv[k]&&nv[k].value)p.push(handText(k,nv[k].value));});
   if(nv.pain&&nv.pain.value>0.15)p.push(`pain ${Math.round(nv.pain.value*10)}/10`);
   if(nv.emotion&&nv.emotion.label&&nv.emotion.label!=='neutral')p.push(`face: ${nv.emotion.label} ${fmtPct(nv.emotion.intensity||0)}`);
   return p.map(x=>`<span class="pill nv">${esc(x)}</span>`).join('');
@@ -245,6 +254,7 @@ function applyNonverbal(nv){
   if(nv.head&&nv.head.value)setChip('head',`${nv.head.value==='yes'?'YES · nod':'NO · shake'}`,false);
   if(nv.blink_code&&nv.blink_code.value)setChip('blink',esc(nv.blink_code.value.toUpperCase()),false);
   if(nv.fingers&&nv.fingers.value!=null)setChip('fingers',esc(nv.fingers.value),false);
+  ['thumb','point'].forEach(k=>{if(nv[k]&&nv[k].value)setChip('hand',esc(handText(k,nv[k].value)),false);});
   if(nv.pain&&nv.pain.value>0.15)setPain(nv.pain.value,false);
 }
 
@@ -313,13 +323,16 @@ let cloned=[],curU=null;const player=new Audio();
 // the automatic speech of an utterance: said once, and its start is that utterance's "first audio"
 function speakOnce(uid,text,opts){if(!text||!$('#autospeak').checked||spoken[uid]===text)return;spoken[uid]=text;speak(text,{...opts,utt_id:uid,onstart:()=>latMark(uid,'audio')});}
 // every browser utterance goes through here: a cancelled one must not fire its onend (a stale prompt_played, a repeated alert)
-function utter(text,v,opts){if(curU)curU.onend=null;speechSynthesis.cancel();const u=curU=new SpeechSynthesisUtterance(text);if(v)u.voice=v;
-  u.onstart=opts.onstart||null;u.onend=opts.onend||null;speechSynthesis.speak(u);}
-function speakBrowser(text,opts,fallback){utter(text,voices.list.find(v=>v.name==='Samantha')||voices.list[0],opts);if(fallback)toast('ElevenLabs unavailable, used browser voice');}
-// the system's own prompts ("Sounds like: X?"): a voice that is never the patient's (ElevenLabs / clone, or Samantha as fallback)
-function speakSystem(text,opts){player.pause();utter(text,voices.list.find(v=>v.name==='Daniel')||voices.list.find(v=>v.name!=='Samantha'),opts);}
+// stop whatever is playing: a superseded clip must not fall back later, a cancelled utterance must not fire its onend / onerror
+function hush(){player.onerror=player.onplaying=player.onended=null;player.pause();if(curU)curU.onend=curU.onerror=null;speechSynthesis.cancel();}
+function utter(text,v,opts){hush();const u=curU=new SpeechSynthesisUtterance(text);if(v)u.voice=v;u.onstart=opts.onstart||null;u.onend=opts.onend||null;
+  u.onerror=e=>toast('Browser speech failed: '+e.error);speechSynthesis.speak(u);}
+const patientVoice=()=>voices.list.find(v=>v.name==='Samantha')||voices.list[0];
+function speakBrowser(text,opts,fallback){utter(text,patientVoice(),opts);if(fallback)toast('ElevenLabs unavailable, used browser voice');}
+// the system's own prompts ("Sounds like: X?"): a voice that is never the patient's (ElevenLabs / clone, or the browser patient voice)
+function speakSystem(text,opts){utter(text,voices.list.find(v=>v.name==='Daniel')||voices.list.find(v=>v!==patientVoice()),opts);}
 function speak(text,opts){if(!text)return;const sel=$('#voice').value||'';opts=opts||{};
-  if(sel.startsWith('clone:')){const sp=sel.slice(6);player.pause();
+  if(sel.startsWith('clone:')){const sp=sel.slice(6);hush();
     // the utterance's face sets the emotion whatever is said for it (lip phrase, LLM/Grok pick, a tapped candidate);
     // the mouthed word timing (rate + server retime) only fits the lip result's own phrase
     const cur=last&&opts.utt_id===last.utt_id,own=cur&&text===last.selected;

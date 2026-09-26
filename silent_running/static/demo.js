@@ -69,8 +69,8 @@ function draw(){
 }
 requestAnimationFrame(draw);
 setInterval(()=>{const [a,b,c,d]=cv.mouthBox||[0,0,0,0];
-  meta({face:true,fps:30,frame_w:W,frame_h:H,bbox:[W-c,b,W-a,d],face_frac:.16,listening:F.listening,n_frames:F.listening?Math.round((performance.now()/1000-F.listenT)*25):0,
-        auto:false,mouth_active:F.talk,expression:{angry:0,warm:F.grimace?0:.1,sad:F.grimace*.7}});},100);
+  meta({face:true,fps:30,frame_w:W,frame_h:H,bbox:[a,b,c,d],source:{kind:'demo',mirror:false},face_frac:.16,listening:F.listening,n_frames:F.listening?Math.round((performance.now()/1000-F.listenT)*25):0,
+        auto:false,mouth_active:F.talk,hands:'on',expression:{angry:0,warm:F.grimace?0:.1,sad:F.grimace*.7}});},100);
 
 // ---------------------------------------------------------------- event helpers
 const ev=m=>handle(m);
@@ -86,7 +86,7 @@ function status(s,stage){ev({type:'status',status:s,...(stage?{stage}:{})});}
 async function mouth(ms){F.listening=true;F.listenT=performance.now()/1000;status('listening');await sleep(250);F.talk=true;signal('mouthing',true,.95);await sleep(ms);F.talk=false;signal('mouthing',false,.95);await sleep(200);F.listening=false;status('processing','crop');}
 function nv({head=null,fingers=null,blink=null,pain=0,emotion='neutral',intensity=0}={}){
   return {head:{value:head,confidence:head?.9:0},fingers:{value:fingers,confidence:fingers!=null?.9:0},blink_code:{value:blink,confidence:blink?.85:0},pain:{value:pain,confidence:.7},emotion:{label:emotion,intensity}};}
-function result(rows,{nonverbal,emotion='neutral',intensity=0,changed=false,dur=1.6}={}){
+function result(rows,{nonverbal,emotion='neutral',intensity=0,changed=false,dur=1.6,critical=false}={}){
   uid++;const words=rows[0][0].split(' '),step=dur/words.length;
   const ranking=rows.map(([phrase,v,f,reasons=[]])=>({phrase,vsr_prob:v,final_prob:f,prior:reasons.length?1.5:0,reasons,vsr_score:Math.log(v)*3,att:Math.log(v)*2.6,ctc:Math.log(v)*4,prefiltered_out:false}));
   const lat={crop:.04+Math.random()*.02,encode:.11+Math.random()*.03,phrase:.24+Math.random()*.08};lat.total=lat.crop+lat.encode+lat.phrase;
@@ -95,7 +95,7 @@ function result(rows,{nonverbal,emotion='neutral',intensity=0,changed=false,dur=
   ev({type:'result',utt_id:uid,mode:'phrase',raw_greedy:rows[0][0].toUpperCase(),selected:rows[0][0],confidence:rows[0][2],margin:.4,visual_top:[...rows].sort((a,b)=>b[1]-a[1])[0][0],
       context_changed_choice:changed,ranking,in_inventory:true,phrase_gap:-1.1,greedy_score:-4.2,best_phrase_score:-3.1,n_frames:Math.round(dur*25),duration:dur,source:'demo',label:null,
       expression:{emotion,intensity},timing:{duration:dur,rate:1,pauses:[],words:words.map((w,i)=>({word:w,start:i*step,end:i*step+step*.85}))},
-      context:{last_prompt:prompt_},latency:lat,nonverbal:nonverbal||nv()});
+      context:{last_prompt:prompt_},latency:lat,nonverbal:nonverbal||nv(),critical});
   return uid;
 }
 function decision(u,text,confidence,source,reason,alternatives=[],action='speak',provider='grok-4 · xAI'){
@@ -147,7 +147,7 @@ const SCENES=[
  {name:'Critical phrase · full-screen escalation',async run(){
    nurse('Okay, I will call them now.');await sleep(1800);
    await mouth(1500);F.grimace=1;signal('pain',.82,.8);await sleep(360);
-   const u=result([["I can't breathe",.62,.83],['I can breathe better now',.14,.08],['I need to cough',.1,.05],['I need suction',.06,.03]],{nonverbal:nv({pain:.82,emotion:'scared',intensity:.8}),emotion:'sad',intensity:.8});
+   const u=result([["I can't breathe",.62,.83],['I can breathe better now',.14,.08],['I need to cough',.1,.05],['I need suction',.06,.03]],{nonverbal:nv({pain:.82,emotion:'scared',intensity:.8}),emotion:'sad',intensity:.8,critical:true});
    await sleep(300);decision(u,"I can't breathe",.92,'fused','Critical phrase. Lips 62% and a strong distress face; escalating.',[{text:'I need suction',confidence:.04}]);
    ev({type:'alert',utt_id:u,text:"I can't breathe",confidence:.83,ts:now()});  // after its decision, as the server sends it
    patientSays("I can't breathe",.92,{source:'fused',critical:true});
@@ -174,7 +174,9 @@ function drawBar(){bar.innerHTML=`<b>DEMO</b><span>${idx+1}/${SCENES.length} · 
   $('#dprev').onclick=()=>go(-1);$('#dnext').onclick=()=>go(1);$('#dplay').onclick=()=>{paused=!paused;drawBar();};}
 function go(d){idx=(idx+d+SCENES.length)%SCENES.length;gen++;drawBar();}
 window.addEventListener('keydown',e=>{if(typing())return;if(e.key==='ArrowRight')go(1);else if(e.key==='ArrowLeft')go(-1);else if(e.key==='p'){paused=!paused;drawBar();}});
-function reset(){Object.assign(F,{talk:false,fingers:null,grimace:0,listening:false});$('#alert').classList.remove('on');status('idle');}
+function reset(){Object.assign(F,{talk:false,fingers:null,grimace:0,listening:false});
+  if(cf)ev({type:'confirm',utt_id:cf.utt_id,candidate:'',attempt:0,state:'rejected',reason:'scene skipped'});  // as the server closes a superseded question
+  $('#alert').classList.remove('on');status('idle');}
 async function runner(){
   for(;;){const g0=gen;reset();drawBar();
     try{await SCENES[idx].run();if(g0===gen)idx=(idx+1)%SCENES.length;}catch(e){if(e!==SKIP)throw e;}

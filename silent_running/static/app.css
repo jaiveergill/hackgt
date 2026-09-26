@@ -53,6 +53,8 @@ details[open] summary{margin-bottom:10px}
 .cam.listening{border-color:var(--fused);box-shadow:0 0 0 2px rgba(90,169,255,.35),0 0 40px rgba(90,169,255,.2)}
 .badge{position:absolute;left:12px;top:12px;display:flex;gap:8px;align-items:center;background:rgba(0,0,0,.55);padding:6px 10px;border-radius:8px;font:500 12px Inter;backdrop-filter:blur(4px)}
 .badge.meter{top:auto;bottom:44px;left:12px}
+.badge.handsbadge{top:48px;color:var(--muted)}.badge.handsbadge.off{color:var(--bad)}
+.badge[hidden]{display:none}
 .dot{width:10px;height:10px;border-radius:50%;background:var(--bad);color:var(--bad)}
 .dot.ok{background:var(--lips)}
 .dot.rec{background:var(--fused);color:var(--fused);animation:pulse 1s infinite}
@@ -75,6 +77,7 @@ details[open] summary{margin-bottom:10px}
 .sig.fresh{animation:pop .5s ease-out}
 @keyframes pop{0%{transform:scale(1.06);box-shadow:0 0 0 0 rgba(177,140,255,.6)}100%{transform:none;box-shadow:0 0 0 12px rgba(177,140,255,0)}}
 .sig.stale{opacity:.55}
+.sig.off{opacity:.4}  /* the hand tracker is off: see the camera badge */
 #sig-mouthing.on{border-color:var(--fused);background:linear-gradient(180deg,rgba(90,169,255,.16),var(--panel))}
 .sig .pulse{width:9px;height:9px;border-radius:50%;background:var(--dim);flex-shrink:0}
 #sig-mouthing.on .pulse{background:var(--fused);color:var(--fused);animation:pulse .8s infinite}
@@ -129,7 +132,7 @@ input.txt:focus,.ctxform input:focus,.ctxform textarea:focus{outline:none;border
 .ring .track{stroke:var(--panel2);stroke-width:10}
 .ring .arc{stroke:var(--c);stroke-width:10;stroke-linecap:round;stroke-dasharray:326.7;stroke-dashoffset:326.7;transition:stroke-dashoffset .7s cubic-bezier(.2,.8,.2,1),stroke .3s;filter:drop-shadow(0 0 6px color-mix(in srgb,var(--c) 60%,transparent))}
 .ring .cd{stroke:var(--confirm);stroke-width:3;stroke-dasharray:276.5;stroke-dashoffset:276.5;opacity:0}
-.hero[data-state="confirm"] .ring .cd{opacity:.8}
+.hero[data-state="confirm"].counting .ring .cd{opacity:.8}
 .ring .pct{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font:800 36px Inter;letter-spacing:-1px}
 .ring .ringlbl{position:absolute;left:0;right:0;bottom:34px;text-align:center;font:700 10px Inter;letter-spacing:1.5px;text-transform:uppercase;color:var(--dim)}
 .hero[data-state="processing"] .ring .arc{stroke-dasharray:60 267;stroke-dashoffset:0;animation:spin 1s linear infinite;transition:none}
@@ -151,7 +154,8 @@ input.txt:focus,.ctxform input:focus,.ctxform textarea:focus{outline:none;border
 .reason:empty{display:none}
 .confirmbar{display:none;margin-top:14px}
 .hero[data-state="confirm"] .confirmbar{display:block}
-.cdbar{height:6px;border-radius:3px;background:var(--panel2);overflow:hidden}
+.cdbar{height:6px;border-radius:3px;background:var(--panel2);overflow:hidden;visibility:hidden}
+.hero.counting .cdbar{visibility:visible}
 .cdbar i{display:block;height:100%;width:100%;background:var(--confirm);transform-origin:left}
 .confirmrow{display:flex;align-items:center;gap:10px;margin-top:10px;font:600 15px Inter;color:var(--confirm)}
 .confirmrow span{flex:1}
@@ -263,4 +267,4 @@ body:has(#demobar.on) .col.left{padding-bottom:64px}
   .nursebar{padding:6px 10px}.hero{padding:14px 22px;min-height:0;gap:20px}.ring{width:112px;height:112px}.ring .pct{font-size:28px}.ring .ringlbl{bottom:22px}
   .hero .text{font-size:clamp(36px,4.4vw,100px)}.hero .text.mid{font-size:clamp(30px,3vw,68px)}.eyebrow{margin-bottom:4px}.reason{margin-top:6px;font-size:14px}
   .confirmbar{margin-top:8px}.confirmrow{margin-top:6px}.confirmrow button{padding:7px 14px}.conf{margin-top:8px}.grid2{min-height:150px;gap:10px}.vitals{display:none}}
-@media (max-width:1100px){#tab-patient,#tab-dev{grid-template-columns:1fr;height:auto}.grid2{grid-template-columns:1fr}.logscroll,.dym{max-height:45vh}.nursebar input.txt{width:160px}}
+@media (max-width:1100px){#tab-patient,#tab-dev{grid-template-columns:1fr;height:auto}.grid2{grid-template-columns:1fr;grid-template-rows:none;flex:none}.logscroll,.dym{max-height:45vh}.nursebar input.txt{width:160px}}

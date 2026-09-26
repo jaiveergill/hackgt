@@ -31,6 +31,7 @@ const V=Date.now();document.write(`<link rel="stylesheet" href="/static/app.css?
       <canvas id="democam" width="640" height="480"></canvas>
       <svg id="overlay" viewBox="0 0 640 480" preserveAspectRatio="xMidYMid slice"><g id="ovbox"></g></svg>
       <div class="badge"><div class="dot" id="dot"></div><span id="track">looking for face…</span></div>
+      <div class="badge handsbadge" id="hands" hidden></div>
       <div class="badge meter" id="meter">face <span>angry <b><i id="m_angry"></i></b></span><span>warm <b><i id="m_warm"></i></b></span><span>sad <b><i id="m_sad"></i></b></span></div>
       <div class="state idle" id="state">idle</div>
       <div class="hint">Face the camera. Hold <kbd>Listen</kbd> (or <kbd>space</kbd>), mouth the phrase silently, release.</div>
