@@ -3,9 +3,10 @@
   create_voice(speaker, wav_paths)    -> voice_id   (Instant Voice Clone; stored in data/voices/<speaker>.json)
   synth(text, voice_id)               -> mp3 bytes  (cached by sha1(voice_id, text) in data/tts_cache/)
   synth_stream(text, voice_id, ...)   -> the same, chunk by chunk as it is generated
+  prefetch(text, voice_id, ...)       -> starts generating a clip that a request will likely ask for soon
   prewarm_phrase_bank(voice_id)       -> synthesizes every phrase in phrases.txt so Phrase Mode plays instantly
 """
-import os, json, hashlib, subprocess, tempfile, time
+import os, json, hashlib, subprocess, tempfile, threading, time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 VOICES_DIR = os.path.join(ROOT, "data", "voices")
@@ -148,35 +149,82 @@ def cached(text, voice_id, emotion="neutral", intensity=0.0, rate=1.0):
     return open(p, "rb").read() if os.path.exists(p) else None
 
 
-def synth(text, voice_id, use_cache=True, emotion="neutral", intensity=0.0, rate=1.0):
+def synth(text, voice_id, emotion="neutral", intensity=0.0, rate=1.0):
     """Returns (mp3_bytes, from_cache, seconds). Emotion/intensity/rate map to a v3 audio tag + stability + speed."""
-    plan, p = _plan(text, voice_id, emotion, intensity, rate)
-    if use_cache and os.path.exists(p):
+    p = _plan(text, voice_id, emotion, intensity, rate)[1]
+    if os.path.exists(p):
         return open(p, "rb").read(), True, 0.0
-    c = _client()
-    if c is None:
-        raise RuntimeError("ELEVENLABS_API_KEY not set in .env")
     t0 = time.time()
-    audio = b"".join(c.text_to_speech.convert(voice_id=voice_id, text=plan["text"], model_id=plan["model"], output_format="mp3_44100_128",
-                                              voice_settings=plan["settings"]))
-    _store(p, audio)
+    audio = b"".join(synth_stream(text, voice_id, emotion, intensity, rate))
     return audio, False, time.time() - t0
+
+
+class _Clip:
+    """A clip being generated: its chunks so far, for every request that reads it."""
+    def __init__(self):
+        self.chunks, self.done, self.error = [], False, None
+        self.cv = threading.Condition()
+
+
+_generating = {}  # cache path -> _Clip in progress
+_generating_lock = threading.Lock()
+
+
+def _generate(text, voice_id, emotion, intensity, rate):
+    """The _Clip of this request: the one in progress, or a new one generated on its own thread. It runs to the end whoever
+    reads it (a listener that leaves early doesn't cut it) and is cached once complete; one that fails upstream is not."""
+    plan, p = _plan(text, voice_id, emotion, intensity, rate)
+    with _generating_lock:
+        clip = _generating.get(p)
+        if clip is None:
+            c = _client()
+            if c is None:
+                raise RuntimeError("ELEVENLABS_API_KEY not set in .env")
+            clip = _generating[p] = _Clip()
+            threading.Thread(target=_run, args=(c, plan, p, voice_id, clip), daemon=True).start()
+    return clip
+
+
+def _run(c, plan, p, voice_id, clip):
+    try:
+        for chunk in c.text_to_speech.stream(voice_id=voice_id, text=plan["text"], model_id=plan["model"], output_format="mp3_44100_128",
+                                             voice_settings=plan["settings"]):
+            with clip.cv:
+                clip.chunks.append(chunk); clip.cv.notify_all()
+        _store(p, b"".join(clip.chunks))
+    except Exception as e:
+        clip.error = e
+    finally:
+        with _generating_lock:
+            _generating.pop(p, None)
+        with clip.cv:
+            clip.done = True; clip.cv.notify_all()
 
 
 def synth_stream(text, voice_id, emotion="neutral", intensity=0.0, rate=1.0):
     """synth(), yielded chunk by chunk as ElevenLabs generates it, for a request that is not cached. v3 (the emotions)
-    streams too: "[angry] I can't breathe" started 0.58 s after the request, and the whole clip took 0.85-1.0 s. The clip is
-    cached only once the stream has completed: one the client dropped or that failed upstream is not."""
-    plan, p = _plan(text, voice_id, emotion, intensity, rate)
-    c = _client()
-    if c is None:
-        raise RuntimeError("ELEVENLABS_API_KEY not set in .env")
-    chunks = []
-    for chunk in c.text_to_speech.stream(voice_id=voice_id, text=plan["text"], model_id=plan["model"], output_format="mp3_44100_128",
-                                         voice_settings=plan["settings"]):
-        chunks.append(chunk)
-        yield chunk
-    _store(p, b"".join(chunks))
+    streams too: "[angry] I can't breathe" started 0.58 s after the request, and the whole clip took 0.85-1.0 s. A clip
+    already being generated (prefetch(), another request) is joined: its chunks so far, then the rest as they come.
+    Raises the upstream error if the generation fails."""
+    clip, i = _generate(text, voice_id, emotion, intensity, rate), 0
+    while True:
+        with clip.cv:
+            while i == len(clip.chunks) and not clip.done:
+                clip.cv.wait()
+            new, done = clip.chunks[i:], clip.done
+        i += len(new)
+        yield from new
+        if done and i == len(clip.chunks):
+            if clip.error is not None:
+                raise clip.error
+            return
+
+
+def prefetch(text, voice_id, emotion="neutral", intensity=0.0, rate=1.0):
+    """Start generating a clip that is not cached, e.g. what will likely be said while the LLM still decides: a request
+    for it then joins the stream instead of starting one."""
+    if cached(text, voice_id, emotion, intensity, rate) is None:
+        _generate(text, voice_id, emotion, intensity, rate)
 
 
 def prewarm_phrase_bank(voice_id, phrases=None, expressive=True):

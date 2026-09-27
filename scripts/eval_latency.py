@@ -1,14 +1,14 @@
 """End-to-end latency on the live path: end of mouthing -> result, decision, and first audio in the real UI. Holds the lock.
 
   python scripts/eval_latency.py --miracl ~/.cache/silent_running/miracl/full --speakers F01 M01 --takes 1 2 \
-      [--voice Bella] [--root <worktree>] [--out results/latency.json]
+      [--voice Bella] [--mode open] [--root <worktree>] [--out results/latency.json]
 
 Builds one video of the clips (each resampled to 25 fps between still stretches of face: 1.5 s before, 3 s after), boots
 the server of --root (default: this checkout) headless, opens its UI in headless Chrome, turns hands-free listening on and
 plays the video as the live source (POST /api/source file:...?loop=0), so it goes through the real capture process,
 auto-listen, decode, decision and the UI's voice. End of mouthing = the wall time the source delivers a clip's last frame
 (t_play + index / 25). Measured per clip:
-  result / decision   the server event's arrival at a WebSocket client
+  result / decision   the server event's arrival at a WebSocket client (--mode open: the decision is the LLM's verdict, `llm`)
   audio               the UI's own first-audio mark (latMark(utt, 'audio'): the <audio>/Web Audio playback started)
 The UI speaks with --voice (an ElevenLabs voice); without it, the browser voice, whose start headless Chrome does not report.
 Prints per-clip rows and medians, with the load average; waits for the server's warm flag first.
@@ -65,6 +65,7 @@ def main():
     ap.add_argument("--takes", nargs="+", type=int, default=[1, 2])
     ap.add_argument("--voice", default=None, help="ElevenLabs voice for the UI (e.g. Bella); default: the browser voice")
     ap.add_argument("--pace", choices=("on", "off"), default=None, help="set the UI's 'match my pace' option (default: as the UI starts)")
+    ap.add_argument("--mode", choices=("phrase", "open"), default="phrase", help="Phrase Mode, or Open Mode (beam search + the LLM's reading)")
     ap.add_argument("--root", default=ROOT, help="worktree whose server is measured")
     ap.add_argument("--chrome", default=None)
     ap.add_argument("--out", default=None, help="write per-clip rows here (JSON)")
@@ -136,6 +137,7 @@ def main():
             page.eval(f"(()=>{{const s=document.querySelector('#voice');s.value='clone:{a.voice}';s.dispatchEvent(new Event('change'));return s.value}})()")
             time.sleep(3)  # the UI's own work on a voice change (e.g. loading audio) finishes before the clips play
         info = http(base + "/api/source?spec=" + urllib.request.quote(f"file:{video}?loop=0"), method="POST")["source"]
+        ws.send(json.dumps({"cmd": "mode", "mode": a.mode}))
         ws.send(json.dumps({"cmd": "settings", "auto_listen": True}))  # needs the camera; the video starts with LEAD s of still face
         t_play = info["t_play"]
         print(f"playing from {time.strftime('%H:%M:%S', time.localtime(t_play))}, load {os.getloadavg()[0]:.1f}", flush=True)
@@ -164,7 +166,7 @@ def main():
         hi = t_play + clips[i + 1]["k_first"] / FPS - PRE + 0.1 if i + 1 < len(clips) else 1e18
         ev = [e for e in events if lo <= e["_t"] < hi]
         res = [e for e in ev if e["type"] == "result"]
-        dec = [e for e in ev if e["type"] == "decision"]
+        dec = [e for e in ev if e["type"] == ("llm" if a.mode == "open" else "decision")]
         r = {"clip": "/".join(c["path"].split("/")[-3:]), "label": c["label"], "n_results": len(res),
              "errors": [e["message"] for e in ev if e["type"] == "error"]}
         if res:
@@ -172,7 +174,7 @@ def main():
             d0 = next((e for e in dec if e["utt_id"] == uid), None)
             audio = next((m["t"] for m in marks if m.get("uid") == uid and m["k"] == "audio"), None)
             r.update(selected=res[0].get("selected"), correct=(res[0].get("selected") or "").lower().replace(" ", "") == c["label"].lower().replace(" ", ""),  # Goodbye
-                     confidence=res[0].get("confidence"), action=d0 and d0["action"], stages=res[0].get("latency"),
+                     confidence=res[0].get("confidence"), action=d0 and d0.get("action", "speak"), stages=res[0].get("latency"),
                      result=res[0]["_t"] - t_last, decision=d0 and d0["_t"] - t_last, audio=audio and audio - t_last,
                      delivery=next(({k: e.get(k) for k in ("cached", "t_synth", "total", "emotion", "rate")} for e in ev
                                     if e["type"] == "delivery" and e.get("utt_id") in (uid, 0)), None))
@@ -186,15 +188,16 @@ def main():
     def med(k, sel=lambda r: True):
         v = sorted(r[k] for r in rows if r.get(k) is not None and sel(r))
         return f"{st.median(v):.2f} s (p90 {v[int(0.9 * len(v))]:.2f}, n={len(v)})" if v else "n/a"
-    stage = lambda k: st.median([r["stages"][k] for r in rows if r.get("stages") and k in r["stages"]]) * 1000
+    stage = {k: st.median(v) * 1000 for k in ("lock", "crop", "encode", "phrase", "beam", "read", "total")
+             if (v := [r["stages"][k] for r in rows if r.get("stages") and k in r["stages"]])}
     print(f"\nroot {a.root} ({subprocess.run(['git', '-C', a.root, 'rev-parse', '--short', 'HEAD'], capture_output=True, text=True).stdout.strip()}), "
-          f"voice {a.voice or 'browser'}, pace {a.pace or 'UI default'}, load {min(loads):.1f}-{max(loads):.1f}")
+          f"{a.mode} mode, voice {a.voice or 'browser'}, pace {a.pace or 'UI default'}, load {min(loads):.1f}-{max(loads):.1f}")
     print(f"clips {len(rows)}, with a result {sum(r['n_results'] > 0 for r in rows)}, more than one result {sum(r['n_results'] > 1 for r in rows)}, "
           f"top-1 {sum(bool(r.get('correct')) for r in rows)}")
     print(f"end of mouthing -> result   {med('result')}")
     print(f"end of mouthing -> decision {med('decision')}")
     print(f"end of mouthing -> audio    {med('audio')}  (decisions to speak: {sum(r.get('action') == 'speak' for r in rows)})")
-    print("server stages, median: " + ", ".join(f"{k} {stage(k):.0f} ms" for k in ("lock", "crop", "encode", "phrase", "total")))
+    print("server stages, median: " + ", ".join(f"{k} {v:.0f} ms" for k, v in stage.items()))
     if a.out:
         json.dump({"root": a.root, "voice": a.voice, "loads": loads, "rows": rows}, open(a.out, "w"), indent=1)
 

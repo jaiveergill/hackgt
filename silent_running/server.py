@@ -230,6 +230,7 @@ def run_decode(rois, duration, source="webcam", label=None, t_crop=0.0, expressi
             for h, p in zip(nbest, probs):
                 h["prob"] = p
             result.update({"nbest": nbest, "selected": _pretty(nbest[0]["text"]), "confidence": probs[0], "context": context.snapshot(), "latency_total": latency["total"]})
+            _prefetch_voice(result["selected"], result["expression"])
             set_status("idle")
             broadcast({"type": "result", **result, "latency": latency})
             confirm_loop.cancel("superseded by a new utterance", ts=t0)
@@ -261,24 +262,29 @@ def _bg_llm(nbest, uid, enc):
     """Open Mode interpretation: the LLM PROPOSES up to 3 sentences the patient most plausibly meant (n-best + context), the
     visual model VERIFIES them in one batch against the video. The LLM's most likely proposal within LLM_MARGIN nats of the
     raw top hypothesis wins; none -> the raw top stands. Every proposal and the verdict are broadcast so the UI shows exactly
-    what happened."""
+    what happened. The verdict goes out as soon as the reply's sentences are in; its reason follows (`llm_reason`)."""
     t0 = time.time()
     ctx = context.snapshot()
     ctx["recent_utterances"] = ctx.pop("history", [])
-    out = llm.propose([{"text": h["text"], "score": h["score"]} for h in nbest], ctx)
-    if not out or "error" in out:
-        broadcast({"type": "llm", "utt_id": uid, "error": (out or {}).get("error", "no response"), "latency": time.time() - t0}); return
     top = nbest[0]["text"].strip().upper()
-    props = out["sentences"]
-    with work_lock:
-        sc = {r["phrase"]: r["score"] for r in engine.score_phrases(enc, list(dict.fromkeys([top] + props)))}
-    gaps = {p: sc[p] - sc[top] for p in props}
-    chosen = next((p for p in props if gaps[p] >= -LLM_MARGIN), None)
-    proposal = chosen or props[0]
-    broadcast({"type": "llm", "utt_id": uid, "proposal": _pretty(proposal), "reason": out["reason"], "gap": gaps[proposal],
-               "accepted": chosen is not None, "changed": proposal != top, "corrected": _pretty(chosen or top),
-               "alternatives": [{"text": _pretty(p), "gap": gaps[p], "fits": gaps[p] >= -LLM_MARGIN} for p in props],
-               "latency": time.time() - t0, "model": f"{llm.provider} {llm.model}"})
+    verdict = False
+    for kind, value in llm.propose_stream([{"text": h["text"], "score": h["score"]} for h in nbest], ctx):
+        if kind == "error":
+            broadcast({"type": "llm_reason" if verdict else "llm", "utt_id": uid, "error": value, "latency": time.time() - t0})
+            return
+        if kind == "reason":
+            broadcast({"type": "llm_reason", "utt_id": uid, "reason": value, "latency": time.time() - t0})
+            continue
+        props, verdict = value, True
+        with work_lock:
+            sc = {r["phrase"]: r["score"] for r in engine.score_phrases(enc, list(dict.fromkeys([top] + props)))}
+        gaps = {p: sc[p] - sc[top] for p in props}
+        chosen = next((p for p in props if gaps[p] >= -LLM_MARGIN), None)
+        proposal = chosen or props[0]
+        broadcast({"type": "llm", "utt_id": uid, "proposal": _pretty(proposal), "gap": gaps[proposal],
+                   "accepted": chosen is not None, "changed": proposal != top, "corrected": _pretty(chosen or top),
+                   "alternatives": [{"text": _pretty(p), "gap": gaps[p], "fits": gaps[p] >= -LLM_MARGIN} for p in props],
+                   "latency": time.time() - t0, "model": f"{llm.provider} {llm.model}"})
 
 
 LAST = {"enc": None, "utt_id": 0}
@@ -528,6 +534,27 @@ def _voice_id(voice):
     return vid if vid and eltts.available() else None
 
 
+def _emotion(emotion, intensity):
+    """The emotion the voice delivers for the face's (emotion, intensity): the UI's forced emotion or "match my face" off win."""
+    if STATE.get("emotion_override"):
+        emotion, intensity = STATE["emotion_override"], max(intensity, 0.7)
+    if not STATE.get("expressive", True):
+        emotion, intensity = "neutral", 0.0
+    return emotion, intensity
+
+
+def _prefetch_voice(text, expression):
+    """Start the voice of `text` as the UI will ask for it (the face's emotion, the natural pace), so its request joins a
+    stream that is already running. Open Mode: the raw reading while the LLM decides, which it keeps most of the time."""
+    vid = _voice_id(None)
+    if vid and not STATE.get("pace"):  # match my pace retimes the whole clip: nothing to stream early
+        emotion, intensity = _emotion(expression.get("emotion", "neutral"), expression.get("intensity", 0.0))
+        try:
+            eltts.prefetch(text, vid, emotion=emotion, intensity=intensity)
+        except Exception as e:  # the UI's own request then reports it (and falls back to the browser voice)
+            print("[tts] prefetch failed:", e)
+
+
 def _mp3(audio, cached, **headers):
     from fastapi.responses import Response
     return Response(content=audio, media_type="audio/mpeg", headers={"X-TTS-Cached": str(cached), **headers})
@@ -594,10 +621,7 @@ def api_say(text: str, emotion: str = "neutral", intensity: float = 0.0, rate: f
     vid = _voice_id(voice)
     if not vid:
         return JSONResponse({"error": "no ElevenLabs voice available"}, status_code=503)
-    if STATE.get("emotion_override"):
-        emotion, intensity = STATE["emotion_override"], max(intensity, 0.7)
-    if not STATE.get("expressive", True):
-        emotion, intensity = "neutral", 0.0
+    emotion, intensity = _emotion(emotion, intensity)
     t0 = time.time()
     plan = eltts.plan_delivery(text, emotion, intensity, rate)
     report = {"emotion": emotion, "intensity": intensity, "rate": rate, "tag": plan["tag"], "model": plan["model"], "stability": plan["settings"]["stability"],

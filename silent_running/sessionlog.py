@@ -62,6 +62,7 @@ _KEEP = {
     "state": ("state",),
     "nbest": ("utt_id", "error"),
     "llm": ("utt_id", "accepted", "changed", "latency", "error"),
+    "llm_reason": ("utt_id", "latency", "error"),
     "confirm": None, "signal": None, "enroll": None, "log": None,
 }
 

@@ -100,6 +100,7 @@ function handle(m){
   else if(m.type==='alert'){showAlert(m);}
   else if(m.type==='nbest'){if(m.error)$('#nbest').textContent='beam n-best failed: '+m.error;else renderNbest(m.nbest);}
   else if(m.type==='llm'){renderLLM(m);}
+  else if(m.type==='llm_reason'){if(last&&m.utt_id===last.utt_id&&$('#llmreason'))$('#llmreason').textContent=m.error?`(reason unavailable: ${m.error})`:m.reason;}  // follows the verdict
   else if(m.type==='delivery'){const d=$('#delivrep');if(d){d.innerHTML=`delivered <b>${esc(m.emotion)}</b>${m.intensity?` ${(m.intensity*100).toFixed(0)}%`:''} · ${esc(m.model)}${m.tag?` · tag <code>${esc(m.tag)}</code>`:''} · stability ${esc(m.stability)} · speed ${m.rate.toFixed(2)}x · synth ${m.cached?'cached':m.streamed?`streamed, first audio ${esc(m.t_synth)} s`:esc(m.t_synth)+' s'}${m.retime&&m.retime.applied?` · retimed (global ${esc(m.retime.global)}x)`:(m.retime&&m.retime.reason?` · no retime: ${esc(m.retime.reason)}`:'')} · total ${esc(m.total)} s`;}renderAudioStrip(m.retime);}
   else if(m.type==='log'){addLog(m.entry);}
   else if(m.type==='error'){toast(m.message);}  // a failed decode comes with its own idle status
@@ -328,7 +329,7 @@ function renderLLM(m){
   if(!m.changed)verdict=`<span class="pill ok">LLM agrees with the visual model</span>`;
   else if(m.accepted)verdict=`<span class="pill ok">accepted · video supports it (${m.gap.toFixed(1)} nats vs raw)</span>`;
   else verdict=`<span class="pill warn">rejected · video does not support it (${m.gap.toFixed(1)} nats vs raw) · kept raw</span>`;
-  $('#llmout').innerHTML=`<div><b>${esc(m.corrected)}</b> ${verdict} <span class="small">· ${esc(m.model)} · ${ms(m.latency)}</span></div>`+(m.changed?`<div class="why">LLM proposed “${esc(m.proposal)}” instead of “${esc(raw)}”. ${esc(m.reason)}</div>`:`<div class="why">${esc(m.reason)}</div>`);
+  $('#llmout').innerHTML=`<div><b>${esc(m.corrected)}</b> ${verdict} <span class="small">· ${esc(m.model)} · ${ms(m.latency)}</span></div>`+`<div class="why">${m.changed?`LLM proposed “${esc(m.proposal)}” instead of “${esc(raw)}”. `:''}<span id="llmreason">${esc(m.reason||'')}</span></div>`;  // the reason arrives after the verdict (llm_reason)
   if(m.alternatives&&m.alternatives.length>1)$('#llmout').insertAdjacentHTML('beforeend',`<div class="why">considered: ${m.alternatives.map(a=>`${esc(a.text)} <span class="small">(${a.gap.toFixed(1)} nats${a.fits?'':' · video: no'})</span>`).join(' · ')}</div>`);
   if(m.changed&&m.accepted){setBig(m.corrected);heroSet('result','fused');$('#conf').insertAdjacentHTML('beforeend',`<span class="pill ctx">context-corrected: ${esc(wordDiff(raw,m.corrected))} · verified by the visual model</span>`);}
   speakOnce(last.utt_id,(m.changed&&m.accepted)?m.corrected:last.selected);

@@ -95,10 +95,20 @@ class LLMInterpreter:
         return self.client is not None
 
     def propose(self, candidates, context):
-        """Up to 3 sentences the patient most plausibly meant, most likely first. The caller must verify each against the
-        visual model before using it."""
+        """Up to 3 sentences the patient most plausibly meant, most likely first: {"sentences", "reason"} or {"error"}. The
+        caller must verify each against the visual model before using it."""
+        out = {}
+        for kind, value in self.propose_stream(candidates, context):
+            out[kind] = value
+        return {"error": out["error"]} if "error" in out else out
+
+    def propose_stream(self, candidates, context):
+        """propose(), streamed: yields ("sentences", [...]) as soon as the reply's sentence list is complete, then
+        ("reason", str); or ("error", str). The sentences come first in the reply and the reason after them took about as
+        long again (Grok: sentences at 0.64 s, whole reply 1.22 s, median of 10), so the caller can act on them at once."""
         if self.client is None:
-            return {"error": f"{self.key_var} not set"}
+            yield "error", f"{self.key_var} not set"
+            return
         sys_p = ("You interpret the output of a silent lip-reading model for a voiceless ICU patient. You get the model's n-best "
                  "hypotheses (higher score = more visual support) plus any context. They are often garbled or ungrammatical: lip "
                  "reading confuses sounds that look alike on the lips (p/b/m, t/d/n, k/g, f/v, s/z, most vowels) and drops or merges "
@@ -112,14 +122,42 @@ class LLMInterpreter:
                   "properties": {"sentences": {"type": "array", "items": {"type": "string"}}, "reason": {"type": "string"}},
                   "required": ["sentences", "reason"]}
         try:
-            r = self.client.chat.completions.create(model=self.model, temperature=0,
+            stream = self.client.chat.completions.create(model=self.model, temperature=0, stream=True,
                 messages=[{"role": "system", "content": sys_p}, {"role": "user", "content": user}],
                 response_format={"type": "json_schema", "json_schema": {"name": "proposal", "strict": True, "schema": schema}})
-            out = json.loads(r.choices[0].message.content)
-            sents = [re.sub(r"[^A-Z' ]", "", t.upper()).strip() for t in out.get("sentences", [])]
-            sents = list(dict.fromkeys(t for t in sents if t))[:3]
-            if not sents:
-                return {"error": "empty proposal"}
-            return {"sentences": sents, "reason": out.get("reason", "")}
+            buf, sents = "", None
+            for chunk in stream:
+                buf += (chunk.choices[0].delta.content or "") if chunk.choices else ""
+                if sents is None:
+                    sents = _sentences_so_far(buf)
+                    if sents is not None:
+                        if not sents:
+                            yield "error", "empty proposal"
+                            return
+                        yield "sentences", sents
+            out = json.loads(buf)
+            if sents is None:  # the reply put the reason first: the sentences are known only now
+                sents = _clean(out.get("sentences", []))
+                if not sents:
+                    yield "error", "empty proposal"
+                    return
+                yield "sentences", sents
+            yield "reason", out.get("reason", "")
         except Exception as e:
-            return {"error": str(e)}
+            yield "error", str(e)
+
+
+def _clean(sentences):
+    sents = [re.sub(r"[^A-Z' ]", "", t.upper()).strip() for t in sentences]
+    return list(dict.fromkeys(t for t in sents if t))[:3]
+
+
+def _sentences_so_far(buf):
+    """The cleaned "sentences" list of a partial JSON reply once that list is complete, else None."""
+    m = re.search(r'"sentences"\s*:\s*', buf)
+    if not m:
+        return None
+    try:
+        return _clean(json.JSONDecoder().raw_decode(buf, m.end())[0])
+    except json.JSONDecodeError:
+        return None
