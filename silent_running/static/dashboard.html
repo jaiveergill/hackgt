@@ -15,20 +15,18 @@
   <div class="cell m" id="m-resp"><span class="label">Avg response</span><span class="v">–</span></div>
   <div class="cell m" id="m-perbed"><span class="label">Requests / bed today</span><span class="v">–</span></div>
   <div class="cell m" id="m-ascend"><span class="label">Ascend engagements</span><span class="v">–</span></div>
-  <div class="cell clock mono" id="clock"></div>
+  <div class="cell clock" id="clock"></div>
 </header>
 
 <main>
   <div class="left">
     <section class="board sec" id="board">
-      <i class="mark tl"></i><i class="mark tr"></i>
-      <div class="sechead"><h2>Beds</h2><p class="muted" id="boardnote"></p></div>
+            <div class="sechead"><h2>Beds</h2><p class="muted" id="boardnote"></p></div>
       <div class="tiles" id="tiles"></div>
     </section>
 
     <section class="detail sec" id="detail" hidden>
-      <i class="mark tl"></i><i class="mark tr"></i>
-      <div class="sechead detailhead">
+            <div class="sechead detailhead">
         <a class="back" href="#" id="back">← All beds</a>
         <h2 id="d-title">Bed 4</h2>
         <span class="status" id="d-status"><i></i><span></span></span>
@@ -48,7 +46,7 @@
         </div>
         <div class="rightcol">
           <div class="guidance" id="guidance" hidden>
-            <div class="ghead"><span class="label" id="g-kind"></span><span class="label sim">Ascend · simulated</span></div>
+            <div class="ghead"><span class="label" id="g-kind"></span><span class="sim">Ascend · simulated</span></div>
             <h3 id="g-title"></h3>
             <p id="g-body"></p>
             <p class="small" id="g-reason"></p>
@@ -71,21 +69,19 @@
     </section>
 
     <section class="ascend sec" id="ascend">
-      <i class="mark tl"></i><i class="mark tr"></i>
-      <div class="sechead"><h2>Ascend journey</h2><span class="label sim">Simulated delivery</span></div>
+            <div class="sechead"><h2>Ascend journey</h2><span class="sim">Simulated delivery</span></div>
       <p class="muted lede">Every request on this board is a real-world event. It goes to Spark as a de-identified trigger (unit, bed, category, urgency, time to acknowledge). Ascend hands the nurse one resource back on the bed's page. What the nurse does with it is the engagement.</p>
       <div class="chips" id="ascendsum"></div>
       <table class="tbl"><thead><tr><th>Time</th><th>Direction</th><th>Event</th><th>Bed</th><th>Detail</th><th>Status</th></tr></thead><tbody id="journey"></tbody></table>
     </section>
 
     <section class="log sec" id="logsec">
-      <i class="mark tl"></i><i class="mark tr"></i><i class="mark bl"></i><i class="mark br"></i>
-      <div class="sechead">
+            <div class="sechead">
         <h2>Log</h2>
         <span class="muted" id="logcount"></span>
         <span class="spacer"></span>
         <span class="label">Download</span>
-        <a class="mono dl" href="/api/unit/log?format=csv">CSV</a><a class="mono dl" href="/api/unit/log?format=jsonl">JSONL</a>
+        <a class="dl" href="/api/unit/log?format=csv">CSV</a><a class="dl" href="/api/unit/log?format=jsonl">JSONL</a>
       </div>
       <div class="chips filters" id="logfilters">
         <button data-k="all" class="on">All</button><button data-k="patient">Patient</button><button data-k="nurse">Nurse</button><button data-k="ack">Acknowledged</button><button data-k="ascend">Ascend</button><button data-k="system">System</button><button data-k="live">Live bed only</button>
