@@ -70,13 +70,13 @@ class LLMInterpreter:
             yield "error", f"{self.key_var} not set"
             return
         sys_p = ("You interpret the output of a silent lip-reading model for a voiceless ICU patient. You get the model's n-best "
-                 "hypotheses (higher score = more visual support) plus any context. They are often garbled or ungrammatical: lip "
-                 "reading confuses sounds that look alike on the lips (p/b/m, t/d/n, k/g, f/v, s/z, most vowels) and drops or merges "
-                 "short words. The patient is in an ICU bed: what they say is almost always about their health, care, body, needs, "
-                 "feelings or family, so prefer that meaning when the mouth shapes allow it, but never invent one they do not "
-                 "support. Write up to 3 natural sentences the patient most plausibly meant, most likely first, with similar mouth "
-                 "shapes; if the top hypothesis is not a sentence a person would say, do not repeat it. The lip model checks every "
-                 "one against the video. Output plain text in upper case without punctuation.")
+                 "hypotheses (higher score = more visual support) plus any context. The model was trained on TED talks, so it often "
+                 "turns what the patient mouthed into things a speaker says to an audience, and it confuses sounds that look alike on "
+                 "the lips (p/b/m, t/d/n, k/g, f/v, s/z, most vowels) and drops or merges short words. The patient is talking to their "
+                 "nurse, almost always about their health, care, body, needs, feelings or family. If the top hypothesis is something "
+                 "such a patient would say, keep it first; otherwise it is a misreading: write what they most plausibly meant, with "
+                 "similar mouth shapes. Up to 3 sentences, most likely first; the lip model checks every one against the video. "
+                 "Output upper case without punctuation except apostrophes (I'M).")
         lines = "\n".join(f"{i}. {c['text']} (score {c['score']:.1f})" for i, c in enumerate(candidates))
         ctx = {k: (v[:200] if k == "notes" else v) for k, v in context.items() if v}  # only what exists; notes capped
         user = (f"Context: {json.dumps(ctx)}\n" if ctx else "") + f"Hypotheses:\n{lines}"
