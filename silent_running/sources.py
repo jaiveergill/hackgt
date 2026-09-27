@@ -31,6 +31,7 @@ class VideoSource:
     discontinuity = False
     finished = False  # a non-looping file reached its end
     stall_s = 1.5     # seconds without frames before the camera process reports a stall and reopens the source
+    rotate = 0        # degrees clockwise the capture process turns every frame (a camera mounted sideways), see make_source
 
     def open(self):
         raise NotImplementedError
@@ -54,7 +55,7 @@ class VideoSource:
         self.open()
 
     def info(self):
-        return {"kind": self.kind, "mirror": self.mirror, "finished": self.finished}
+        return {"kind": self.kind, "mirror": self.mirror, "finished": self.finished, "rotate": self.rotate}
 
 
 def _open_cv(index, width, height):
@@ -785,13 +786,12 @@ class SerialSource(Esp32Source):
         return {**super().info(), "port": self.name, "baud": self.baud}
 
 
-def with_zoom(spec, zoom):
-    """The source spec with window= set to zoom (none at 1x): what a restarted capture process should open."""
+def with_param(spec, key, value):
+    """The source spec with key=value set (None: removed): what a restarted capture process should open."""
     base, _, query = spec.partition("?")
-    kv = [p for p in query.split("&") if p and not p.startswith("window=")]
-    zoom = float(str(zoom).lower().rstrip("x"))
-    if zoom != 1:
-        kv.append(f"window={zoom:g}x")
+    kv = [p for p in query.split("&") if p and not p.startswith(key + "=")]
+    if value is not None:
+        kv.append(f"{key}={value}")
     return base + ("?" + "&".join(kv) if kv else "")
 
 
@@ -799,9 +799,27 @@ def _flag(v):
     return str(v).lower() not in ("0", "false", "no", "off")
 
 
+def rotate_frame(bgr, degrees):
+    """Turn a frame clockwise by a multiple of 90 degrees (exact: no resampling, no cropping)."""
+    import cv2
+    return cv2.rotate(bgr, {90: cv2.ROTATE_90_CLOCKWISE, 180: cv2.ROTATE_180, 270: cv2.ROTATE_90_COUNTERCLOCKWISE}[degrees])
+
+
 def make_source(spec, width=640, height=480, face_fn=None):
-    """Build a VideoSource from a spec string (see module docstring). An int is treated as a webcam index."""
+    """Build a VideoSource from a spec string (see module docstring). An int is treated as a webcam index. Any spec takes
+    rotate=90|180|270 (clockwise, for a camera mounted sideways): the capture process turns every frame before tracking."""
     spec = str(spec if spec is not None else "webcam").strip()
+    base, _, query = spec.partition("?")
+    rest = [kv for kv in query.split("&") if kv and not kv.startswith("rotate=")]
+    rotate = int(next((kv.split("=", 1)[1] for kv in query.split("&") if kv.startswith("rotate=")), 0)) % 360
+    if rotate not in (0, 90, 180, 270):
+        raise ValueError(f"rotate must be 90, 180 or 270 (degrees clockwise), got {rotate}")
+    src = _make_source(base + ("?" + "&".join(rest) if rest else ""), width, height, face_fn)
+    src.rotate = rotate
+    return src
+
+
+def _make_source(spec, width, height, face_fn):
     if spec.lstrip("-").isdigit():
         spec = f"webcam:{spec}"
     if spec.startswith(("http://", "https://")) or re.match(r"^\d{1,3}(\.\d{1,3}){3}(:\d+)?(/[^?]*)?(\?.*)?$", spec):

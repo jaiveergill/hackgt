@@ -44,7 +44,7 @@ details[open] summary{margin-bottom:10px}
 
 /* ---------- camera */
 .cam{position:relative;background:#000;border-radius:var(--r);overflow:hidden;border:1px solid var(--line);aspect-ratio:4/3;max-height:46vh;min-height:140px}  /* shrinks first when the column is short */
-.cam img,.cam canvas{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;display:block}
+.cam img,.cam canvas{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;display:block}  /* the whole frame, also a rotated (portrait) one */
 .cam canvas{display:none}
 .cam.demo img{display:none}.cam.demo canvas{display:block}
 .cam svg{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
@@ -63,6 +63,8 @@ details[open] summary{margin-bottom:10px}
 .state.listening{color:var(--fused)}.state.processing{color:var(--confirm)}.state.idle{color:var(--muted)}.state.nurse_listening{color:var(--confirm)}.state.offline{color:var(--bad)}
 .toggle.zoom{position:absolute;right:12px;top:48px;background:rgba(0,0,0,.55);border-color:transparent}
 .toggle.zoom button{padding:5px 10px;font-size:12px}.toggle.zoom.busy{opacity:.5;pointer-events:none}.toggle[hidden]{display:none}
+.rotate{position:absolute;right:12px;top:84px;background:rgba(0,0,0,.55);border:0;border-radius:10px;color:var(--muted);padding:5px 10px;font:600 12px Inter;cursor:pointer}
+.rotate.busy{opacity:.5;pointer-events:none}.rotate[hidden]{display:none}
 .hint{position:absolute;left:0;right:0;bottom:0;padding:10px 12px;background:linear-gradient(transparent,rgba(0,0,0,.8));font-size:12px;color:#cfd9e4}
 .meter{gap:6px;font:500 10px var(--mono);color:var(--muted)}
 .meter b{display:inline-block;width:40px;height:5px;background:rgba(255,255,255,.1);border-radius:3px;overflow:hidden;vertical-align:middle}

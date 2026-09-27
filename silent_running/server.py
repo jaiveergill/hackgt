@@ -745,6 +745,23 @@ def api_zoom(zoom: float):
     return {"ok": True, "source": info}
 
 
+@app.post("/api/rotate")
+def api_rotate(degrees: int):
+    """Turn the camera image clockwise by 0/90/180/270 degrees, live (a camera mounted sideways on the glasses)."""
+    if degrees % 90 or not 0 <= degrees < 360:
+        return JSONResponse({"error": "degrees must be 0, 90, 180 or 270"}, status_code=400)
+    if camera is None or not camera.opened:
+        return JSONResponse({"error": "no camera"}, status_code=400)
+    try:
+        info = camera.set_rotate(degrees)
+    except (RuntimeError, queue.Empty) as e:
+        msg = str(e) or "the capture process did not answer"
+        broadcast({"type": "error", "message": f"rotate {degrees}: {msg}"})
+        return JSONResponse({"error": msg, "source": camera.source_info}, status_code=400)
+    sessionlog.log("rotate", degrees=degrees, source=info)
+    return {"ok": True, "source": info}
+
+
 def _file_rois(path):
     """Video file -> (abs path, mouth crops, n_frames, crop seconds, fps), or a JSONResponse error."""
     p = path if os.path.isabs(path) else os.path.join(ROOT, path)

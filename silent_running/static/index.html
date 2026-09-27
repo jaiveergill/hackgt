@@ -30,12 +30,13 @@ const V=Date.now();document.write(`<link rel="stylesheet" href="/static/app.css?
     <div class="cam" id="camwrap">
       <img id="cam" alt="camera">
       <canvas id="democam" width="640" height="480"></canvas>
-      <svg id="overlay" viewBox="0 0 640 480" preserveAspectRatio="xMidYMid slice"><g id="ovbox"></g></svg>
+      <svg id="overlay" viewBox="0 0 640 480" preserveAspectRatio="xMidYMid meet"><g id="ovbox"></g></svg>
       <div class="badge"><div class="dot" id="dot"></div><span id="track">looking for face…</span></div>
       <div class="badge handsbadge" id="hands" hidden></div>
       <div class="badge meter">face <span>angry <b><i id="m_angry"></i></b></span><span>warm <b><i id="m_warm"></i></b></span><span>sad <b><i id="m_sad"></i></b></span></div>
       <div class="state idle" id="state">idle</div>
       <div class="toggle zoom" id="zoom" hidden title="ESP32-CAM sensor zoom: 2x reads the centre half of the view at 2x the pixels across the mouth"><button data-z="1">1x</button><button data-z="2">2x</button></div>
+      <button class="rotate" id="rotate" hidden title="Turn the camera image 90° clockwise (a camera mounted sideways on the glasses)">↻ 0°</button>
       <div class="hint">Face the camera. Hold <kbd>Listen</kbd> (or <kbd>space</kbd>), mouth the phrase silently, release.</div>
     </div>
     <div class="signals">
