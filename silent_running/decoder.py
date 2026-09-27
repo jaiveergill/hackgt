@@ -32,11 +32,14 @@ class PhraseDecoder:
         self.correction = {p: TOKEN_BONUS * (len(engine.tokenize(p)) + 1) - ILM_WEIGHT * ilm.get(p, 0.0) for p in phrases}
         self.profile = None  # active enroll.Profile (patient enrollment); None = generic model
 
-    def decode(self, enc):
+    def decode(self, enc, free=None):
+        """free: the model's own free transcript, scored in the same pass (-> "free_score", None without one)."""
         prof = self.profile  # read once: a profile switch mid-decode must not mix two profiles
         proto = prof.evidence(enc, self.phrases) if prof else {}  # template log-likelihood ratios; unenrolled phrases get 0
         # sorted by VSR score; a phrase the templates support is scored in full even outside the CTC prefilter
-        vsr = self.engine.score_phrases(enc, self.phrases, always=[p for p, e in proto.items() if e > 0])
+        vsr = self.engine.score_phrases(enc, self.phrases, always=[p for p, e in proto.items() if e > 0], extra=[free] if free else [])
+        free_score = next((r["score"] for r in vsr if r.get("extra")), None)
+        vsr = [r for r in vsr if not r.get("extra")]
         prior = {p["phrase"]: p for p in self.context.log_prior(self.phrases)}
         lips = {r["phrase"]: r["score"] + self.correction[r["phrase"]] + proto.get(r["phrase"], 0.0) for r in vsr}
         # a prefiltered-out phrase has only a CTC estimate below every rescored one: its correction must not lift it above them
@@ -58,4 +61,4 @@ class PhraseDecoder:
         margin = rows[0]["final_score"] - rows[1]["final_score"] if len(rows) > 1 else 99.0
         visual_top = max(lips, key=lips.get)  # lips + templates, before context
         return {"ranking": rows, "selected": rows[0]["phrase"], "confidence": rows[0]["final_prob"], "margin": margin,
-                "visual_top": visual_top, "context_changed_choice": rows[0]["phrase"] != visual_top}
+                "visual_top": visual_top, "context_changed_choice": rows[0]["phrase"] != visual_top, "free_score": free_score}

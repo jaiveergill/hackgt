@@ -51,6 +51,30 @@ retime. Retiming the voice to the mouthing ("match my pace") is now a separate o
 Accuracy: unchanged. MIRACL through the camera path (FaceLandmarker, auto-listen window, 213-phrase inventory): top-1
 238/397 on main and on the port, the same phrase on 397/397.
 
+## Root-cause fixes (2026-09-27, branch `latency-improvement-audit`)
+
+- **Expressive voice streams.** Every voice delivery in the session logs was `eleven_v3`, not cached and synthesized whole:
+  1.1-3.1 s before a sound played. "Match my face" (on by default) sends any face intensity >= 0.22 there, and so does
+  every critical alert ("urgent" = angry, rate 1.1, never cached). `/api/say` now streams a request it has nothing to retime
+  (`tts.synth_stream` takes the emotion): "[angry] I can't breathe" played its first chunk at 0.58 s vs 0.85-1.0 s whole.
+- **Hands-free utterances are read during the hang.** Their frames are fixed 0.15 s (POST_ROLL) into the stillness, 0.2 s
+  before the 0.35 s hang confirms the end; the capture process sends the utterance then (`ahead`), the server reads it at
+  once and publishes it when the hang confirms, or drops it if the mouth moves again. Same frames, so the same result:
+  `scripts/check_cropper.py` (402/402 identical crops from the early copy), `scripts/check_ahead.py` (server wiring).
+  The reading (~0.15-0.2 s on an idle M2) comes off every hands-free decision. Keep-warm skips its tick while the mouth is
+  still, so its 60-100 ms dummy encode never delays that reading.
+- **One decoder pass per utterance.** The "weak match" check scored the free transcript in a second decoder call; it now
+  rides in the shortlist's batch, and the CTC scores are computed once (over the ~290 tokens the phrases use, not all 5000:
+  identical numbers). A/B against main on 378 MIRACL clips (both scorers on the same encodings):
+  same phrase 378/378, identical scores, free-transcript score within 2.3e-5 nats; phrase stage median 90 -> 69 ms, p90
+  172 -> 104 ms (load 6.5-7.5).
+- **Nurse question: stops when the nurse pauses** (0.7 s below -35 dB, 5 s at most) instead of always recording 5 s:
+  transcription of a 1.5 s question starts ~3.3 s after the button instead of 5 s.
+- Not done: compiling the encoder for every utterance length. A first call at a new length measured 116-128 ms vs 93-106 ms
+  repeated on a quiet machine (12 lengths): ~20 ms, not worth 150 extra GPU calls after every start.
+- End to end (`scripts/eval_latency.py`) could not be measured this time: other workspaces' servers had the 8 GB laptop
+  paging (load 5.6-22.4), and main and this branch both returned results for under 7 of 40 clips, with 18-24 s encodes.
+
 ## What was not ported, and why
 
 - **Deciding while the mouth is still moving** (fast-path's streaming commit). Offline on the same 397 clips (the review's

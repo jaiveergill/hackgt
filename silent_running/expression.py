@@ -62,8 +62,8 @@ class ExpressionTracker:
     def start(self):
         self.utt = []
 
-    def finish(self):
-        """-> {emotion, intensity, scores, n_frames}. Call at the end of a listen window."""
+    def finish(self, reset=True):
+        """-> {emotion, intensity, scores, n_frames}. Call at the end of a listen window (reset=False: the window goes on)."""
         if len(self.utt) < 5:
             return {"emotion": "neutral", "intensity": 0.0, "scores": {}, "n_frames": len(self.utt)}
         agg = {}
@@ -75,7 +75,8 @@ class ExpressionTracker:
         inten = float(np.clip(agg[best] * 1.6, 0.0, 1.0))  # gain: resting-vs-expressive deltas are small
         out = {"emotion": best if inten >= NEUTRAL_THRESHOLD else "neutral", "intensity": round(inten if inten >= NEUTRAL_THRESHOLD else 0.0, 2),
                "scores": {e: round(max(agg[e], 0.0), 3) for e in EMOTIONS}, "baseline": {e: round(self.baseline[e], 3) for e in EMOTIONS}, "n_frames": len(self.utt)}
-        self.utt = []
+        if reset:
+            self.utt = []
         return out
 
     def live_meta(self):
