@@ -5,10 +5,12 @@ import threading, time
 
 
 class AmbientCamera:
-    def __init__(self, index=None, width=640, fps=12, quality=70):
+    def __init__(self, index=None, width=640, fps=12, quality=70, avoid=None):
         """index None: probe 0-2 and keep the first camera that delivers frames (on a Mac with an iPhone paired, index 0 can be a
-        Continuity Camera that opens but never delivers)."""
+        Continuity Camera that opens but never delivers). avoid(): the index the bedside feed is using when it is a laptop
+        webcam; two processes on one AVFoundation device throttle each other to a frame every few seconds, so it is skipped."""
         self.want, self.index, self.width, self.fps, self.quality = index, index, width, fps, quality
+        self.avoid = avoid or (lambda: None)
         self.jpeg = None
         self.opened = False
         self.error = None
@@ -19,7 +21,10 @@ class AmbientCamera:
     def _open(self):
         import cv2
         errors = []
+        busy = self.avoid()
         for idx in ([self.want] if self.want is not None else [0, 1, 2]):  # re-probe on every open: indices reorder as a Continuity Camera comes and goes
+            if idx == busy and self.want is None:
+                errors.append(f"index {idx} is the bedside feed"); continue
             cap = cv2.VideoCapture(idx)
             if not cap.isOpened():
                 errors.append(f"index {idx} did not open"); continue
@@ -33,6 +38,8 @@ class AmbientCamera:
                 time.sleep(0.05)
             cap.release()
             errors.append(f"index {idx} delivered no frames")
+        if busy is not None and all("bedside" in e or "did not open" in e for e in errors):
+            raise RuntimeError("the only camera is the bedside feed (connect the glasses to free it)")
         raise RuntimeError("laptop camera: " + "; ".join(errors) + " (busy, or camera permission denied?)")
 
     def _run(self):

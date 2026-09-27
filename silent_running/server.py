@@ -8,7 +8,7 @@ import av
 import numpy as np
 import torch
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
-from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse
+from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -606,11 +606,86 @@ def ambient_stream():
     return StreamingResponse(_ambient_mjpeg(), media_type="multipart/x-mixed-replace; boundary=frame")
 
 
+FEED_LABELS = {"stream": "Glasses camera", "serial": "Glasses camera (USB)", "webcam": "Laptop webcam", "usb": "USB camera", "file": "Recording"}
+
+
+def feeds_snapshot():
+    """What the board shows about its two feeds, from the real sources: the bedside camera (the glasses, or whatever stands
+    in for them right now) and the laptop's ambient camera."""
+    info = (camera.source_info or {}) if camera else {}
+    meta = camera.meta if camera else {}
+    kind = info.get("kind")
+    bedside = {"kind": kind, "opened": bool(camera and camera.opened), "fatal": camera.fatal if camera else "no camera",
+               "label": FEED_LABELS.get(kind, "Camera"), "glasses": kind in ("stream", "serial"),
+               "detail": info.get("url") or info.get("port") or (os.path.basename(info["path"]) if info.get("path") else None) or (f"index {info['index']}" if info.get("index") is not None else None),
+               "fps": meta.get("fps"), "face": meta.get("face"), "mouth_px": meta.get("mouth_px"),
+               "stats": camera.stats if camera else None}
+    amb = ambient.info() if ambient else None
+    if amb:
+        amb["label"] = "Laptop camera"
+        amb["same_as_bedside"] = kind == "webcam" and amb.get("opened") and info.get("index") == amb.get("index")
+    return {"bedside": bedside, "ambient": amb}
+
+
+def _board_monitor():
+    """Every 2 s: if the bedside camera's source, its liveness, or the ambient camera's state changed, log it on the unit (the
+    board's log) and push the new feeds to the board. A camera that stalls or reconnects shows up within 2 s."""
+    last = None
+    while True:
+        time.sleep(2.0)
+        try:
+            if unit is None:
+                continue
+            f = feeds_snapshot()
+            b, a = f["bedside"], f["ambient"] or {}
+            key = (b["kind"], b["opened"], b["detail"], bool(a.get("opened")), a.get("index"), (a.get("error") or "")[:40], bool(b["stats"] and b["stats"].get("fps", 1) == 0))
+            if key != last:
+                if True:
+                    txt = (f"Bedside feed: {b['label']}" + (f" ({b['detail']})" if b["detail"] else "") + (", live" if b["opened"] else f", not delivering ({b['fatal'] or 'stalled'})"))
+                    txt += " · Ambient: " + ("laptop camera live" if a.get("opened") else f"unavailable ({a.get('error') or 'starting'})" if a else "off")
+                    unit.system(txt, bedside=b["kind"], bedside_live=b["opened"], ambient_live=bool(a.get("opened")))
+                last = key
+            broadcast({"type": "feeds", "feeds": f})
+        except Exception as e:
+            print("[board]", repr(e))
+
+
 @app.get("/api/unit")
 def api_unit():
     if unit is None:
         return JSONResponse({"error": "no unit"}, status_code=404)
-    return {**unit.snapshot(), "ambient": ambient.info() if ambient else None, "camera": camera.source_info if camera else None}
+    return {**unit.snapshot(), "feeds": feeds_snapshot(), "ambient": ambient.info() if ambient else None, "camera": camera.source_info if camera else None}
+
+
+@app.get("/api/unit/log")
+def api_unit_log(format: str = "json", kinds: str = None, limit: int = 2000):
+    """Today's board log, flat: patient and nurse lines on every bed, acknowledgements, system events, Ascend events.
+    format=json | jsonl | csv (download). kinds=patient,nurse,ack,system,ascend"""
+    if unit is None:
+        return JSONResponse({"error": "no unit"}, status_code=404)
+    want = set(kinds.split(",")) if kinds else None
+    rows = unit.log_rows(kinds=(want - {"ascend"}) if want else None) if (want is None or want - {"ascend"}) else []
+    if ascend and (want is None or "ascend" in want):
+        for e in ascend.snapshot(limit=500)["events"]:
+            p = e.get("payload") or {}
+            rows.append({"ts": e["ts"], "kind": "ascend", "bed": e.get("bed"), "text": e["kind"] + (f" · {p.get('trigger')}" if p.get("trigger") else f" · {p.get('resource')}" if p.get("resource") else ""),
+                         "detail": {"direction": e["direction"], "status": e["status"], **{k: v for k, v in p.items() if k not in ("unit",)}}})
+    rows.sort(key=lambda r: r["ts"])
+    rows = rows[-limit:]
+    stamp = time.strftime("%Y-%m-%d")
+    if format == "jsonl":
+        body = "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows)
+        return Response(body, media_type="application/x-ndjson", headers={"Content-Disposition": f"attachment; filename=unit-log-{stamp}.jsonl"})
+    if format == "csv":
+        import csv, io
+        buf = io.StringIO(); w = csv.writer(buf)
+        w.writerow(["time", "kind", "bed", "text", "level", "category", "confidence", "by", "time_to_ack_s", "detail"])
+        for r in rows:
+            w.writerow([time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(r["ts"])), r["kind"], r.get("bed") or "", r["text"], r.get("level") or "", r.get("category") or "",
+                        r.get("confidence") if r.get("confidence") is not None else "", r.get("by") or "", r.get("time_to_ack_s") if r.get("time_to_ack_s") is not None else "",
+                        json.dumps(r["detail"], ensure_ascii=False) if r.get("detail") else ""])
+        return Response(buf.getvalue(), media_type="text/csv", headers={"Content-Disposition": f"attachment; filename=unit-log-{stamp}.csv"})
+    return {"rows": rows, "now": time.time()}
 
 
 @app.get("/api/unit/bed")
@@ -1352,7 +1427,10 @@ def main():
     unit = Unit(real_bed=args.bed, real_initials=args.initials, emit=_unit_emit, simulate=not args.no_simulate)
     print(f"[unit] {len(unit.beds)} beds (live: bed {unit.real_bed}), {len(unit.alerts)} alerts on file for today")
     if args.ambient != "none":
-        ambient = AmbientCamera(index=None if args.ambient == "auto" else int(args.ambient))
+        def _bedside_index():  # the laptop webcam the bedside feed holds, if that is what it is right now
+            info = (camera.source_info or {}) if camera else {}
+            return info.get("index") if info.get("kind") == "webcam" else None
+        ambient = AmbientCamera(index=None if args.ambient == "auto" else int(args.ambient), avoid=_bedside_index)
     threading.Thread(target=_signal_worker, daemon=True).start()  # camera signals, including cameras created later via /api/source
     llm = OpenAIChooser(model=args.llm)
     print(f"[llm] openai {args.llm} available={llm.available()}")
@@ -1371,6 +1449,8 @@ def main():
         sessionlog.log("camera_opened", opened=camera.opened, fatal=camera.fatal, source=camera.source_info or str(camera.source))
     threading.Thread(target=_keep_warm, daemon=True).start()
     threading.Thread(target=_link_monitor, daemon=True).start()
+    unit.system(f"Server started ({sha or 'no git'}), bedside source {args.source or 'webcam'}", git=sha, source=args.source or "webcam")
+    threading.Thread(target=_board_monitor, daemon=True).start()  # the board's feeds and its log follow the real cameras
     STATE["warm"] = True  # engine warmed up and the camera started (or failed, reported): latency from now on is steady state
     def _prewarm_tts():  # the ElevenLabs SDK import and client, and the stock voice list the UI asks for first
         t = time.time()

@@ -59,6 +59,7 @@ class Unit:
         self.real_bed = real_bed
         self.beds = {}
         self.alerts = {}
+        self.system_log = []        # unit-level events (camera source, ambient camera, server start), for the board's log
         self.next_alert = 1
         self._add_bed(real_bed, real_initials, real_note, real=True)
         for bed, ini, note in SIM_BEDS:
@@ -124,6 +125,36 @@ class Unit:
                 self._persist({"ev": "nurse", "bed": bed, "text": text, "by": by, "ts": rec["ts"]})
                 self._emit("nurse", bed, None)
             return rec
+
+    def system(self, text, ts=None, _replay=False, **kw):
+        """Something about the unit itself (a camera opened or stalled, the server started): logged and shown, never an alert."""
+        with self.lock:
+            rec = {"ts": ts or time.time(), "who": "system", "text": text, **kw}
+            self.system_log.append(rec); del self.system_log[:-500]
+            if not _replay:
+                self._persist({"ev": "system", "text": text, "ts": rec["ts"], **{k: v for k, v in kw.items() if isinstance(v, (str, int, float, bool, type(None)))}})
+                self.emit({"type": "unit", "event": "system", "line": rec, "metrics": self.metrics(), "now": time.time()})
+            return rec
+
+    def log_rows(self, since=None, kinds=None):
+        """Everything that happened today, one flat row per event, oldest first: patient and nurse lines on every bed,
+        acknowledgements, system events. `kinds`: subset of patient|nurse|ack|system."""
+        with self.lock:
+            day0 = since if since is not None else self._day_start()
+            rows = []
+            for b in self.beds.values():
+                for l in b["transcript"]:
+                    rows.append({"ts": l["ts"], "kind": l["who"], "bed": b["bed"], "text": l["text"], "level": l.get("level"), "category": l.get("category"),
+                                 "confidence": l.get("confidence"), "by": l.get("by")})
+            for a in self.alerts.values():
+                if a["ack_ts"] is not None:
+                    rows.append({"ts": a["ack_ts"], "kind": "ack", "bed": a["bed"], "text": a["text"], "level": a["level"], "by": a["ack_by"],
+                                 "time_to_ack_s": round(a["ack_ts"] - a["ts"], 1), "alert": a["id"]})
+            for r in self.system_log:
+                rows.append({"ts": r["ts"], "kind": "system", "bed": None, "text": r["text"], "detail": {k: v for k, v in r.items() if k not in ("ts", "who", "text")}})
+            rows = [r for r in rows if r["ts"] >= day0 and (kinds is None or r["kind"] in kinds)]
+            rows.sort(key=lambda r: r["ts"])
+            return rows
 
     def ack(self, alert_id, by="charge nurse", ts=None, _replay=False):
         with self.lock:
@@ -196,12 +227,16 @@ class Unit:
                 continue
             if r.get("bed") is not None and r["bed"] not in self.beds:
                 continue
+            if r.get("ev") is None:
+                continue
             if r["ev"] == "patient":
                 self.patient_said(r["bed"], r["text"], r.get("category"), r.get("critical"), r.get("confidence"), ts=r["ts"], _replay=True)
             elif r["ev"] == "nurse":
                 self.nurse_said(r["bed"], r["text"], r.get("by"), ts=r["ts"], _replay=True)
             elif r["ev"] == "ack" and r["alert"] in self.alerts:
                 self.ack(r["alert"], r.get("by"), ts=r["ts"], _replay=True)
+            elif r["ev"] == "system":
+                self.system(r["text"], ts=r["ts"], _replay=True, **{k: v for k, v in r.items() if k not in ("ev", "text", "ts")})
 
     # ---------------------------------------------------------------------------------------- simulation
     def _sim_event(self, bed, level, ts, ack_after):

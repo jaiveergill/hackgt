@@ -11,6 +11,7 @@ Engagement (a resource opened, a medical science liaison asked) is journaled: th
 import json, os, threading, time, urllib.request
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+UNIT_DIR = os.path.join(ROOT, "data", "unit")
 
 # One Ascend-style resource per request category. `kind` uses Impiricus's resource types. Medical-affairs material only:
 # never promotion, never in the alert path. Content is placeholder text for the demo and is labelled simulated in the UI.
@@ -49,6 +50,27 @@ class AscendBridge:
         self.journal = []       # everything handed to / back from Ascend today, newest last
         self.next_id = 1
         self.ask_counts = {}    # category -> requests today, for the ION-style next best action
+        self.path = os.path.join(UNIT_DIR, time.strftime("%Y-%m-%d") + ".ascend.jsonl")  # the journey survives a restart
+        self._fh = None
+        self._replay()
+
+    def _persist(self, rec):
+        if self._fh is None:
+            os.makedirs(UNIT_DIR, exist_ok=True)
+            self._fh = open(self.path, "a", buffering=1)
+        self._fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+
+    def _replay(self):
+        if not os.path.exists(self.path):
+            return
+        for line in open(self.path):
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue
+            self.journal.append(rec)
+            self.next_id = max(self.next_id, rec.get("id", 0) + 1)
+        del self.journal[:-500]
 
     # ------------------------------------------------------------------ unit board -> Ascend (Spark triggers)
     def on_unit_event(self, m):
@@ -77,6 +99,7 @@ class AscendBridge:
         with self.lock:
             self.next_id += 1
             self.journal.append(rec); del self.journal[:-500]
+            self._persist(rec)
         if self.webhook:
             threading.Thread(target=self._deliver, args=(rec,), daemon=True).start()
         self.emit({"type": "ascend", "event": rec, "summary": self.summary()})
