@@ -9,7 +9,7 @@ const EMBED = new URLSearchParams(location.search).has('embed');
 if (EMBED) document.body.classList.add('embed');
 
 let U = {beds: [], alerts: [], metrics: {}, real_bed: null, ambient: null, feeds: null};
-let A = {summary: {}, events: []};   // the Impiricus Ascend seam (simulated)
+let A = {summary: {}, events: []};   // the Ascend seam (simulated)
 let L = [];                          // today's flat log
 let logFilter = 'all';
 let bedsById = {};

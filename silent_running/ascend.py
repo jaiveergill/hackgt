@@ -1,19 +1,19 @@
-"""The Impiricus seam: what the unit board hands to Impiricus Ascend, and what Ascend hands back to the nurse.
+"""The Ascend seam: what the unit board hands to Ascend, and what Ascend hands back to the nurse.
 
-Impiricus has no public API, so this side is SIMULATED and every screen says so. The shapes follow Impiricus's own vocabulary:
+Ascend has no public API, so this side is SIMULATED and every screen says so. The shapes follow the platform's own vocabulary:
   * Spark runs engagement journeys triggered by real-world events (a first-time prescription, ...). The board contributes a new
     trigger: a bedside request, de-identified (unit, bed, category, urgency, time-to-acknowledge; never a name or PHI).
   * Ascend connects HCPs to pharma resources in real time (dosing calculators, treatment information, patient resources, Wallet
     cards). The board surfaces one resource to the bedside nurse, a care-team audience DocUpdate (prescriber-only) cannot reach.
   * ION picks the next best action from engagement and clinical signals. Here it is a transparent rule over today's requests.
-Engagement (a resource opened, a medical science liaison asked) is journaled: that is the metric Impiricus sells on.
+Engagement (a resource opened, a medical science liaison asked) is journaled: that is the metric the platform sells on.
 """
 import json, os, threading, time, urllib.request
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 UNIT_DIR = os.path.join(ROOT, "data", "unit")
 
-# One Ascend-style resource per request category. `kind` uses Impiricus's resource types. Medical-affairs material only:
+# One Ascend-style resource per request category. `kind` uses Ascend's resource types. Medical-affairs material only:
 # never promotion, never in the alert path. Content is placeholder text for the demo and is labelled simulated in the UI.
 RESOURCES = {
     "pain": {"kind": "Treatment information", "title": "ICU pain reassessment after a non-verbal report",
@@ -44,7 +44,7 @@ RESOURCE_FOR_LEVEL = {"urgent": "urgent"}
 class AscendBridge:
     def __init__(self, emit=None, webhook=None, unit_name="ICU 4B"):
         self.emit = emit or (lambda m: None)
-        self.webhook = webhook  # a real endpoint if Impiricus ever offers one; None = simulated delivery
+        self.webhook = webhook  # a real endpoint if Ascend ever offers one; None = simulated delivery
         self.unit_name = unit_name
         self.lock = threading.RLock()  # snapshot() calls summary() under it
         self.journal = []       # everything handed to / back from Ascend today, newest last
@@ -127,7 +127,7 @@ class AscendBridge:
         if cat not in RESOURCES:
             return None
         r = dict(RESOURCES[cat])
-        r.update({"category": cat, "reason": reason, "source": "Impiricus Ascend (simulated)"})
+        r.update({"category": cat, "reason": reason, "source": "Ascend (simulated)"})
         return r
 
     def _cat_of(self, text):
@@ -158,7 +158,7 @@ class AscendBridge:
         return None
 
     def engaged(self, action, bed, resource=None, by="charge nurse"):
-        """The nurse acted on an Ascend resource: this is the engagement Impiricus measures."""
+        """The nurse acted on an Ascend resource: this is the engagement Ascend measures."""
         return self._send(f"engagement.{action}", {"unit": self.unit_name, "bed": bed, "resource": resource, "by": by}, bed=bed, direction="in")
 
     # ------------------------------------------------------------------ views
@@ -170,7 +170,7 @@ class AscendBridge:
                     "resources_opened": sum(r["kind"] == "engagement.opened" for r in today),
                     "msl_asks": sum(r["kind"] == "engagement.msl" for r in today),
                     "wallet_sent": sum(r["kind"] == "engagement.wallet" for r in today),
-                    "delivery": "webhook " + self.webhook if self.webhook else "simulated (no public Impiricus API)"}
+                    "delivery": "webhook " + self.webhook if self.webhook else "simulated (no public Ascend API)"}
 
     def snapshot(self, limit=40):
         with self.lock:

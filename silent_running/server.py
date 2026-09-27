@@ -707,7 +707,7 @@ def api_unit_ack(alert: int, by: str = "charge nurse"):
 
 @app.get("/api/ascend")
 def api_ascend():
-    """What the board handed to Impiricus Ascend today (Spark triggers) and what came back (engagements). Simulated: no public API."""
+    """What the board handed to Ascend today (Spark triggers) and what came back (engagements). Simulated: no public API."""
     if ascend is None:
         return JSONResponse({"error": "no ascend bridge"}, status_code=404)
     return ascend.snapshot()
@@ -725,7 +725,7 @@ def api_ascend_bed(bed: str):
 
 @app.post("/api/ascend/engage")
 def api_ascend_engage(bed: str, action: str, resource: str = None, by: str = "charge nurse"):
-    """The nurse opened a resource, asked a medical science liaison, or sent a Wallet card: the engagement Impiricus measures."""
+    """The nurse opened a resource, asked a medical science liaison, or sent a Wallet card: the engagement Ascend measures."""
     if ascend is None or action not in ("opened", "msl", "wallet"):
         return JSONResponse({"error": "bad action"}, status_code=400)
     rec = ascend.engaged(action, bed, resource=resource, by=by)
@@ -1381,7 +1381,7 @@ def main():
     ap.add_argument("--ambient", default="auto", help="ambient overview camera for the dashboard: auto (the first laptop camera that delivers frames), an index, or none")
     ap.add_argument("--bed", default=os.environ.get("SR_BED", "4"), help="the live patient's bed number on the dashboard")
     ap.add_argument("--initials", default=os.environ.get("SR_INITIALS", "J.G."), help="the live patient's initials on the dashboard")
-    ap.add_argument("--ascend-webhook", default=os.environ.get("ASCEND_WEBHOOK", ""), help="POST Spark triggers here (an Impiricus endpoint, if one ever exists); empty = simulated delivery")
+    ap.add_argument("--ascend-webhook", default=os.environ.get("ASCEND_WEBHOOK", ""), help="POST Spark triggers here (an Ascend endpoint, if one ever exists); empty = simulated delivery")
     ap.add_argument("--no-simulate", action="store_true", help="dashboard: no simulated beds' activity")
     ap.add_argument("--confirm-timeout", type=float, default=confirm_mod.TIMEOUT, help="seconds to wait for a nod/shake after 'Sounds like: X?'")
     args = ap.parse_args()
@@ -1418,7 +1418,7 @@ def main():
                                        "scoring": {k: v for k, v in os.environ.items() if k.startswith("SR_")}})
         print(f"[capture] logging live utterances to {os.path.relpath(capture.path, ROOT)}")
     ascend = AscendBridge(emit=broadcast, webhook=args.ascend_webhook or None)
-    def _unit_emit(m):  # every unit event reaches the board, and the Impiricus seam sees it too
+    def _unit_emit(m):  # every unit event reaches the board, and the Ascend seam sees it too
         broadcast(m)
         try:
             ascend.on_unit_event(m)
