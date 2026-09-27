@@ -8,7 +8,7 @@ import av
 import numpy as np
 import torch
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
-from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse
+from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -21,6 +21,9 @@ from silent_running import tts as eltts
 from silent_running import prosody
 from silent_running import sessionlog
 from silent_running import captures
+from silent_running.unit import Unit
+from silent_running.ambient import AmbientCamera
+from silent_running.ascend import AscendBridge
 
 STATIC = os.path.join(ROOT, "silent_running", "static")
 app = FastAPI(title="Silent Running")
@@ -31,6 +34,7 @@ STATE = {"auto_listen": False, "voice": None, "expressive": True, "emotion_overr
 clients = set()
 loop = None
 engine = camera = context = llm = capture = None
+unit = ambient = ascend = None  # the charge nurse's unit (silent_running/unit.py) and the laptop's ambient camera (ambient.py)
 phrases = load_phrases()
 PHRASE_TABLE = load_phrase_table()
 LOG = []  # conversation log: [{ts, who, text, ...}]
@@ -184,7 +188,7 @@ def run_decode(rois, duration, source="webcam", label=None, t_crop=0.0, expressi
         _prefetch_voice(result["selected"], result["expression"])
         interpret = STATE["llm_enabled"] and llm is not None
         if not interpret:  # the reading is final: an alert before the result, whose speech it replaces
-            _alert_if_critical(result["selected"], uid, probs[0])
+            _patient_final(result["selected"], uid, probs[0])
         set_status("idle")
         broadcast({"type": "result", **result, "latency": latency})
         context.add_history(nbest[0]["text"])
@@ -207,7 +211,7 @@ def _bg_llm(nbest, uid, enc, confidence):
     for kind, value in llm.propose_stream([{"text": h["text"], "score": h["score"]} for h in nbest], ctx):
         if kind == "error":
             if not verdict:  # the raw reading is what the UI says
-                _alert_if_critical(_pretty(top), uid, confidence)
+                _patient_final(_pretty(top), uid, confidence)
             broadcast({"type": "llm_reason" if verdict else "llm", "utt_id": uid, "error": value, "latency": time.time() - t0})
             return
         if kind == "reason":
@@ -219,7 +223,7 @@ def _bg_llm(nbest, uid, enc, confidence):
         gaps = {p: sc[p] - sc[top] for p in props}
         chosen = next((p for p in props if gaps[p] >= -LLM_MARGIN), None)
         proposal = chosen or props[0]
-        _alert_if_critical(_pretty(chosen or top), uid, confidence)
+        _patient_final(_pretty(chosen or top), uid, confidence)
         broadcast({"type": "llm", "utt_id": uid, "proposal": _pretty(proposal), "gap": gaps[proposal],
                    "accepted": chosen is not None, "changed": proposal != top, "corrected": _pretty(chosen or top),
                    "alternatives": [{"text": _pretty(p), "gap": gaps[p], "fits": gaps[p] >= -LLM_MARGIN} for p in props],
@@ -234,12 +238,16 @@ def _norm(text):
 
 
 CRITICAL = {_norm(r["phrase"]) for r in PHRASE_TABLE if r["critical"]}  # phrases.txt lines marked " !"
+CATEGORY_OF = {_norm(r["phrase"]): r["category"] for r in PHRASE_TABLE}
 
 
-def _alert_if_critical(text, uid, confidence):
-    """The full-screen alert (the UI announces it twice, urgently) when what the patient is about to be heard saying is a
-    critical phrase. Sent before the event whose speech it replaces."""
-    if _norm(text) in CRITICAL:
+def _patient_final(text, uid, confidence):
+    """What the patient is about to be heard saying is settled: onto the nurse board's bed transcript, and the full-screen
+    alert (the UI announces it twice, urgently) if it is a critical phrase. Sent before the event whose speech it replaces."""
+    critical = _norm(text) in CRITICAL
+    if unit:
+        unit.patient_said(unit.real_bed, text, CATEGORY_OF.get(_norm(text)), critical, confidence)
+    if critical:
         broadcast({"type": "alert", "utt_id": uid, "text": text, "confidence": confidence, "ts": time.time()})
 
 
@@ -294,6 +302,8 @@ def _log(who, text, **kw):
     rec = {"ts": time.time(), "who": who, "text": text, **kw}
     LOG.append(rec); del LOG[:-200]
     broadcast({"type": "log", "entry": rec})
+    if who == "nurse" and unit:  # the bedside conversation's other half, documented on the bed
+        unit.nurse_said(unit.real_bed, text, by="bedside nurse")
 
 
 NURSE_PAUSE = 0.7  # s of silence after speech that ends the nurse's question
@@ -447,6 +457,167 @@ async def mjpeg():
 @app.get("/stream")
 def stream():
     return StreamingResponse(mjpeg(), media_type="multipart/x-mixed-replace; boundary=frame")
+
+
+# ----------------------------------------------------------------------------- charge nurse dashboard
+@app.get("/dashboard")
+def dashboard():
+    return HTMLResponse(open(os.path.join(STATIC, "dashboard.html")).read())
+
+
+async def _ambient_mjpeg():
+    boundary = b"--frame"
+    last = None
+    while True:
+        jpg = ambient.jpeg if ambient else None
+        if jpg is not None and jpg is not last:
+            last = jpg
+            yield boundary + b"\r\nContent-Type: image/jpeg\r\nContent-Length: " + str(len(jpg)).encode() + b"\r\n\r\n" + jpg + b"\r\n"
+        await asyncio.sleep(1 / 12)
+
+
+@app.get("/ambient")
+def ambient_stream():
+    """The laptop's own camera (ambient overview of the room), preview only."""
+    if ambient is None:
+        return JSONResponse({"error": "ambient camera off (--ambient none)"}, status_code=404)
+    return StreamingResponse(_ambient_mjpeg(), media_type="multipart/x-mixed-replace; boundary=frame")
+
+
+FEED_LABELS = {"stream": "Glasses camera", "serial": "Glasses camera (USB)", "webcam": "Laptop webcam", "usb": "USB camera", "file": "Recording"}
+
+
+def feeds_snapshot():
+    """What the board shows about its two feeds, from the real sources: the bedside camera (the glasses, or whatever stands
+    in for them right now) and the laptop's ambient camera."""
+    info = (camera.source_info or {}) if camera else {}
+    meta = camera.meta if camera else {}
+    kind = info.get("kind")
+    bedside = {"kind": kind, "opened": bool(camera and camera.opened), "fatal": camera.fatal if camera else "no camera",
+               "label": FEED_LABELS.get(kind, "Camera"), "glasses": kind in ("stream", "serial"),
+               "detail": info.get("url") or info.get("port") or (os.path.basename(info["path"]) if info.get("path") else None) or (f"index {info['index']}" if info.get("index") is not None else None),
+               "fps": meta.get("fps"), "face": meta.get("face"), "mouth_px": meta.get("mouth_px"),
+               "stats": camera.stats if camera else None}
+    amb = ambient.info() if ambient else None
+    if amb:
+        amb["label"] = "Laptop camera"
+        amb["same_as_bedside"] = kind == "webcam" and amb.get("opened") and info.get("index") == amb.get("index")
+    return {"bedside": bedside, "ambient": amb}
+
+
+def _board_monitor():
+    """Every 2 s: if the bedside camera's source, its liveness, or the ambient camera's state changed, log it on the unit (the
+    board's log) and push the new feeds to the board. A camera that stalls or reconnects shows up within 2 s."""
+    last = None
+    while True:
+        time.sleep(2.0)
+        try:
+            if unit is None:
+                continue
+            f = feeds_snapshot()
+            b, a = f["bedside"], f["ambient"] or {}
+            key = (b["kind"], b["opened"], b["detail"], bool(a.get("opened")), a.get("index"), (a.get("error") or "")[:40], bool(b["stats"] and b["stats"].get("fps", 1) == 0))
+            if key != last:
+                txt = (f"Bedside feed: {b['label']}" + (f" ({b['detail']})" if b["detail"] else "") + (", live" if b["opened"] else f", not delivering ({b['fatal'] or 'stalled'})"))
+                txt += " · Ambient: " + ("laptop camera live" if a.get("opened") else f"unavailable ({a.get('error') or 'starting'})" if a else "off")
+                unit.system(txt, bedside=b["kind"], bedside_live=b["opened"], ambient_live=bool(a.get("opened")))
+                last = key
+            broadcast({"type": "feeds", "feeds": f})
+        except Exception as e:
+            print("[board]", repr(e))
+
+
+@app.get("/api/unit")
+def api_unit():
+    if unit is None:
+        return JSONResponse({"error": "no unit"}, status_code=404)
+    return {**unit.snapshot(), "feeds": feeds_snapshot(), "ambient": ambient.info() if ambient else None, "camera": camera.source_info if camera else None}
+
+
+@app.get("/api/unit/log")
+def api_unit_log(format: str = "json", kinds: str = None, limit: int = 2000):
+    """Today's board log, flat: patient and nurse lines on every bed, acknowledgements, system events, Ascend events.
+    format=json | jsonl | csv (download). kinds=patient,nurse,ack,system,ascend"""
+    if unit is None:
+        return JSONResponse({"error": "no unit"}, status_code=404)
+    want = set(kinds.split(",")) if kinds else None
+    rows = unit.log_rows(kinds=(want - {"ascend"}) if want else None) if (want is None or want - {"ascend"}) else []
+    if ascend and (want is None or "ascend" in want):
+        for e in ascend.snapshot(limit=500)["events"]:
+            p = e.get("payload") or {}
+            rows.append({"ts": e["ts"], "kind": "ascend", "bed": e.get("bed"), "text": e["kind"] + (f" · {p.get('trigger')}" if p.get("trigger") else f" · {p.get('resource')}" if p.get("resource") else ""),
+                         "detail": {"direction": e["direction"], "status": e["status"], **{k: v for k, v in p.items() if k not in ("unit",)}}})
+    rows.sort(key=lambda r: r["ts"])
+    rows = rows[-limit:]
+    stamp = time.strftime("%Y-%m-%d")
+    if format == "jsonl":
+        body = "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows)
+        return Response(body, media_type="application/x-ndjson", headers={"Content-Disposition": f"attachment; filename=unit-log-{stamp}.jsonl"})
+    if format == "csv":
+        import csv, io
+        buf = io.StringIO(); w = csv.writer(buf)
+        w.writerow(["time", "kind", "bed", "text", "level", "category", "confidence", "by", "time_to_ack_s", "detail"])
+        for r in rows:
+            w.writerow([time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(r["ts"])), r["kind"], r.get("bed") or "", r["text"], r.get("level") or "", r.get("category") or "",
+                        r.get("confidence") if r.get("confidence") is not None else "", r.get("by") or "", r.get("time_to_ack_s") if r.get("time_to_ack_s") is not None else "",
+                        json.dumps(r["detail"], ensure_ascii=False) if r.get("detail") else ""])
+        return Response(buf.getvalue(), media_type="text/csv", headers={"Content-Disposition": f"attachment; filename=unit-log-{stamp}.csv"})
+    return {"rows": rows, "now": time.time()}
+
+
+@app.get("/api/unit/bed")
+def api_unit_bed(bed: str):
+    if unit is None or bed not in unit.beds:
+        return JSONResponse({"error": f"no bed {bed}"}, status_code=404)
+    with unit.lock:
+        return unit.bed_view(bed, transcript=True)
+
+
+@app.post("/api/unit/ack")
+def api_unit_ack(alert: int, by: str = "charge nurse"):
+    try:
+        a = unit.ack(alert, by=by)
+    except KeyError as e:
+        return JSONResponse({"error": str(e)}, status_code=404)
+    return {"ok": True, "alert": a, "metrics": unit.metrics()}
+
+
+@app.get("/api/ascend")
+def api_ascend():
+    """What the board handed to Ascend today (Spark triggers) and what came back (engagements). Simulated: no public API."""
+    if ascend is None:
+        return JSONResponse({"error": "no ascend bridge"}, status_code=404)
+    return ascend.snapshot()
+
+
+@app.get("/api/ascend/bed")
+def api_ascend_bed(bed: str):
+    """The Ascend resource and ION-style next best action for one bed's detail view."""
+    if unit is None or ascend is None or bed not in unit.beds:
+        return JSONResponse({"error": f"no bed {bed}"}, status_code=404)
+    with unit.lock:
+        v = unit.bed_view(bed, transcript=True)
+    return {"resource": ascend.resource_for(v), "next_best_action": ascend.next_best_action(v)}
+
+
+@app.post("/api/ascend/engage")
+def api_ascend_engage(bed: str, action: str, resource: str = None, by: str = "charge nurse"):
+    """The nurse opened a resource, asked a medical science liaison, or sent a Wallet card: the engagement Ascend measures."""
+    if ascend is None or action not in ("opened", "msl", "wallet"):
+        return JSONResponse({"error": "bad action"}, status_code=400)
+    rec = ascend.engaged(action, bed, resource=resource, by=by)
+    if unit and bed in unit.beds:  # documented on the bed like any other line at the bedside
+        note = {"opened": f"Opened Ascend resource: {resource}", "msl": f"Asked a medical science liaison about: {resource}", "wallet": f"Sent Wallet card: {resource}"}[action]
+        unit.nurse_said(bed, note, by=by)
+    return {"ok": True, "event": rec, "summary": ascend.summary()}
+
+
+@app.post("/api/unit/nurse")
+def api_unit_nurse(bed: str, text: str, by: str = "charge nurse"):
+    """A note the charge nurse types on a bed's detail view (documented like a bedside line)."""
+    if unit is None or bed not in unit.beds:
+        return JSONResponse({"error": f"no bed {bed}"}, status_code=404)
+    return {"ok": True, "line": unit.nurse_said(bed, text.strip(), by=by)}
 
 
 def _voice_id(voice):
@@ -902,7 +1073,7 @@ async def _startup():
 
 
 def main():
-    global engine, camera, context, llm, capture
+    global engine, camera, context, llm, capture, unit, ambient, ascend
     ap = argparse.ArgumentParser()
     ap.add_argument("--source", default=None, help="video source: webcam[:N] | usb[:N|name] | file:path.mp4[?loop=0&realtime=0] | stream:<ESP32 host>[?window=2x] | serial[?window=2x] (ESP32-CAM over USB) (default: webcam auto-detect)")
     ap.add_argument("--camera", type=int, default=-1, help="shorthand for --source webcam:N; -1 = auto-detect first live camera")
@@ -915,6 +1086,11 @@ def main():
     ap.add_argument("--model-dir", default=None, help="VSR checkpoint dir (default models/LRS3_V_WER19.1; use models/adapted_<name> after scripts/adapt.py)")
     ap.add_argument("--voice", default=None, help="default TTS voice: cloned speaker name or stock ElevenLabs voice name (e.g. Bella)")
     ap.add_argument("--no-camera", action="store_true")
+    ap.add_argument("--ambient", default="auto", help="ambient overview camera for the dashboard: auto (the first laptop camera that delivers frames), an index, or none")
+    ap.add_argument("--bed", default=os.environ.get("SR_BED", "4"), help="the live patient's bed number on the dashboard")
+    ap.add_argument("--initials", default=os.environ.get("SR_INITIALS", "J.G."), help="the live patient's initials on the dashboard")
+    ap.add_argument("--ascend-webhook", default=os.environ.get("ASCEND_WEBHOOK", ""), help="POST Spark triggers here (an Ascend endpoint, if one ever exists); empty = simulated delivery")
+    ap.add_argument("--no-simulate", action="store_true", help="dashboard: no simulated beds' activity")
     args = ap.parse_args()
     if (args.source or "").startswith("serial"):
         # The ESP32-CAM's CH340 buffers 32 bytes (~0.2 ms at 1.5 Mbaud) and macOS drains it from a user-space driver
@@ -935,6 +1111,20 @@ def main():
                                        "model_dir": STATE["model_dir"],
                                        "scoring": {k: v for k, v in os.environ.items() if k.startswith("SR_")}})
         print(f"[capture] logging live utterances to {os.path.relpath(capture.path, ROOT)}")
+    ascend = AscendBridge(emit=broadcast, webhook=args.ascend_webhook or None)
+    def _unit_emit(m):  # every unit event reaches the board, and the Ascend seam sees it too
+        broadcast(m)
+        try:
+            ascend.on_unit_event(m)
+        except Exception as e:
+            print("[ascend]", repr(e))
+    unit = Unit(real_bed=args.bed, real_initials=args.initials, emit=_unit_emit, simulate=not args.no_simulate)
+    print(f"[unit] {len(unit.beds)} beds (live: bed {unit.real_bed}), {len(unit.alerts)} alerts on file for today")
+    if args.ambient != "none":
+        def _bedside_index():  # the laptop webcam the bedside feed holds, if that is what it is right now
+            info = (camera.source_info or {}) if camera else {}
+            return info.get("index") if info.get("kind") == "webcam" else None
+        ambient = AmbientCamera(index=None if args.ambient == "auto" else int(args.ambient), avoid=_bedside_index)
     threading.Thread(target=_signal_worker, daemon=True).start()  # camera signals, including cameras created later via /api/source
     llm = LLMInterpreter(provider=args.llm_provider, model=args.llm)
     print(f"[llm] {llm.provider} {llm.model} available={llm.available()}" + ("" if llm.available() else f" (set {llm.key_var} in .env)"))
@@ -953,6 +1143,8 @@ def main():
         sessionlog.log("camera_opened", opened=camera.opened, fatal=camera.fatal, source=camera.source_info or str(camera.source))
     threading.Thread(target=_keep_warm, daemon=True).start()
     threading.Thread(target=_link_monitor, daemon=True).start()
+    unit.system(f"Server started ({sha or 'no git'}), bedside source {args.source or 'webcam'}", git=sha, source=args.source or "webcam")
+    threading.Thread(target=_board_monitor, daemon=True).start()  # the board's feeds and its log follow the real cameras
     STATE["warm"] = True  # engine warmed up and the camera started (or failed, reported): latency from now on is steady state
     def _prewarm_tts():  # the ElevenLabs SDK import and client, and the stock voice list the UI asks for first
         t = time.time()

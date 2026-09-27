@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Unit board</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="data:,">
+<script>const V=Date.now();document.write(`<link rel="stylesheet" href="/static/dashboard.css?v=${V}">`);</script>
+</head>
+<body>
+<header class="top" id="top">
+  <div class="cell brand" id="brandcell"><a href="/dashboard">Silent Running</a><span class="muted">Unit board</span></div>
+  <div class="cell unit"><span class="label">Unit</span><span class="v">ICU · 4B <span class="live" id="conn"><i></i><span>connecting</span></span></span></div>
+  <div class="cell m" id="m-open"><span class="label">Open requests</span><span class="v">–</span></div>
+  <div class="cell m" id="m-resp"><span class="label">Avg response</span><span class="v">–</span></div>
+  <div class="cell m" id="m-perbed"><span class="label">Requests / bed today</span><span class="v">–</span></div>
+  <div class="cell m" id="m-ascend"><span class="label">Ascend engagements</span><span class="v">–</span></div>
+  <div class="cell clock" id="clock"></div>
+</header>
+
+<main>
+  <div class="left">
+    <section class="board sec" id="board">
+            <div class="sechead"><h2>Beds</h2><p class="muted" id="boardnote"></p></div>
+      <div class="tiles" id="tiles"></div>
+    </section>
+
+    <section class="detail sec" id="detail" hidden>
+            <div class="sechead detailhead">
+        <a class="back" href="#" id="back">← All beds</a>
+        <h2 id="d-title">Bed 4</h2>
+        <span class="status" id="d-status"><i></i><span></span></span>
+        <p class="muted" id="d-note"></p>
+      </div>
+      <div class="detailbody">
+        <div class="camcol">
+          <div class="cam" id="d-cam">
+            <img id="d-img" alt="">
+            <div class="camlabel" id="d-camlabel"></div>
+            <div class="nocam" id="d-nocam" hidden>No camera on a simulated bed</div>
+          </div>
+          <div class="cam small" id="d-ambient">
+            <img id="d-amb" alt="">
+            <div class="camlabel" id="d-amblabel">Ambient · laptop camera</div>
+          </div>
+        </div>
+        <div class="rightcol">
+          <div class="guidance" id="guidance" hidden>
+            <div class="ghead"><span class="label" id="g-kind"></span><span class="sim">Ascend · simulated</span></div>
+            <h3 id="g-title"></h3>
+            <p id="g-body"></p>
+            <p class="small" id="g-reason"></p>
+            <div class="gactions">
+              <button class="primary" id="g-cta"></button>
+              <button id="g-msl">Ask a medical science liaison</button>
+            </div>
+            <div class="nba" id="nba" hidden><span class="label">ION next best action</span><span id="nba-text"></span></div>
+          </div>
+          <div class="transcript">
+            <div class="thead"><h3>Today at the bedside</h3><span class="muted small">Patient's words and the nurse's, as they happened</span></div>
+            <ol id="d-lines"></ol>
+            <form class="noteform" id="noteform">
+              <input id="noteinput" type="text" placeholder="Add a note to this bed's record" autocomplete="off">
+              <button type="submit">Add note</button>
+            </form>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="ascend sec" id="ascend">
+            <div class="sechead"><h2>Ascend journey</h2><span class="sim">Simulated delivery</span></div>
+      <p class="muted lede">Every request on this board is a real-world event. It goes to Spark as a de-identified trigger (unit, bed, category, urgency, time to acknowledge). Ascend hands the nurse one resource back on the bed's page. What the nurse does with it is the engagement.</p>
+      <div class="chips" id="ascendsum"></div>
+      <table class="tbl"><thead><tr><th>Time</th><th>Direction</th><th>Event</th><th>Bed</th><th>Detail</th><th>Status</th></tr></thead><tbody id="journey"></tbody></table>
+    </section>
+
+    <section class="log sec" id="logsec">
+            <div class="sechead">
+        <h2>Log</h2>
+        <span class="muted" id="logcount"></span>
+        <span class="spacer"></span>
+        <span class="label">Download</span>
+        <a class="dl" href="/api/unit/log?format=csv">CSV</a><a class="dl" href="/api/unit/log?format=jsonl">JSONL</a>
+      </div>
+      <div class="chips filters" id="logfilters">
+        <button data-k="all" class="on">All</button><button data-k="patient">Patient</button><button data-k="nurse">Nurse</button><button data-k="ack">Acknowledged</button><button data-k="ascend">Ascend</button><button data-k="system">System</button><button data-k="live">Live bed only</button>
+      </div>
+      <div class="logwrap"><table class="tbl"><thead><tr><th>Time</th><th>Kind</th><th>Bed</th><th>Text</th><th>Detail</th></tr></thead><tbody id="logrows"></tbody></table></div>
+    </section>
+  </div>
+
+  <aside class="feed sec">
+    <div class="sechead"><h2>Requests</h2><span class="muted" id="feedcount"></span></div>
+    <ol id="alerts"></ol>
+    <p class="muted empty" id="feedempty" hidden>Nothing waiting. Every request today has been acknowledged.</p>
+  </aside>
+</main>
+
+<script>document.write(`<script src="/static/dashboard.js?v=${V}"><\/script>`);</script>
+</body>
+</html>

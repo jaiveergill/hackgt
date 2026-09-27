@@ -54,6 +54,7 @@ def _jsonable(v):
 
 # fields worth keeping from each broadcast event type (everything else in the event is UI payload)
 _KEEP = {
+    "feeds": None, "unit": None, "ascend": None,  # the nurse board's own events: they have their own log (data/unit/)
     "result": ("utt_id", "selected", "confidence", "n_frames", "duration", "source", "latency", "ahead", "raw_greedy", "mouth_px"),
     "delivery": ("utt_id", "cached", "streamed", "t_synth", "total", "model"),
     "alert": ("utt_id", "text", "confidence"),
