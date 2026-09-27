@@ -169,8 +169,7 @@ while time.time() - t0 < 2.5 and src.read()[0]:
     pass
 time.sleep(1.2)
 check("no bytes" in (src.fault() or ""), f"stall reason: {src.fault()!r}")
-time.sleep(max(board.silent_until - time.time(), 0))
-src.reopen()
+src.reopen()  # still silent: the camera process reopens during the stall
 fps, _, _ = frames(src, 2)
 check(src._ser is not ser and fps > 10, f"the port was reopened and frames came back: {fps:.1f} fps")
 src.release()
