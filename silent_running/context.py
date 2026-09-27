@@ -1,32 +1,14 @@
-"""Context store + transparent contextual prior + optional LLM reranker.
-
-The visual model is authoritative. Context only *adjusts* scores of candidates the VSR model already
-supports; it never introduces phrases. Every adjustment is returned so the UI can show it.
-"""
+"""What the patient's words are read against: the context the nurse and the UI set (ContextStore), and the LLM that
+interprets the lip reading with it (LLMInterpreter). The visual model is authoritative: it verifies every LLM proposal."""
 import os, json, time, re, threading
-
-def _load_categories():
-    from silent_running.vsr import load_phrase_table
-    cats = {}
-    for r in load_phrase_table():
-        cats.setdefault(r["category"], []).append(r["phrase"])
-    return cats
-CATEGORIES = _load_categories()
-PHRASE_CATEGORY = {p.lower(): c for c, ps in CATEGORIES.items() for p in ps}
-STOP = set("i am a the to my me is it of and please need want".split())
-
-
-def _words(s):
-    return [w for w in re.findall(r"[a-z']+", s.lower()) if w not in STOP]
 
 
 class ContextStore:
-    def __init__(self, w_category=1.5, w_keyword=1.0, w_recent=0.5, w_question=1.5):
+    def __init__(self):
         self.notes = ""            # free text typed by staff, e.g. "post-op day 1, complained of chest pain"
-        self.category = None       # patient-selected category (or None)
-        self.history = []          # [(ts, phrase)] of confirmed utterances
-        self.last_prompt = ""      # what the nurse just said/asked (typed in UI), e.g. "Do you want water?"
-        self.w = dict(category=w_category, keyword=w_keyword, recent=w_recent, question=w_question)
+        self.category = None       # the topic picked in the UI (a phrases.txt category), or None
+        self.history = []          # [(ts, text)] of what the patient said
+        self.last_prompt = ""      # what the nurse just said/asked, e.g. "Do you want water?"
         self.lock = threading.Lock()
 
     def update(self, notes=None, category=None, last_prompt=None):
@@ -44,28 +26,6 @@ class ContextStore:
         with self.lock:
             return {"notes": self.notes, "category": self.category, "last_prompt": self.last_prompt,
                     "history": [p for _, p in self.history[-6:]]}
-
-    def log_prior(self, phrases):
-        """Additive log-prior adjustment per phrase, plus a human-readable list of reasons."""
-        snap = self.snapshot()
-        note_words = set(_words(snap["notes"])) | set(_words(snap["last_prompt"]))
-        is_question = snap["last_prompt"].strip().endswith("?") or bool(re.match(r"^(do|did|are|is|can|could|would|will|have|has|should)\b", snap["last_prompt"].strip().lower()))
-        recent = [p.lower() for p in snap["history"][-3:]]
-        out = []
-        for p in phrases:
-            adj, reasons = 0.0, []
-            pl = p.lower()
-            if snap["category"] and PHRASE_CATEGORY.get(pl) == snap["category"]:
-                adj += self.w["category"]; reasons.append(f"category:{snap['category']}")
-            ov = note_words & set(_words(p))
-            if ov:
-                adj += self.w["keyword"] * min(len(ov), 2); reasons.append("keywords:" + ",".join(sorted(ov)))
-            if is_question and pl in ("yes", "no"):
-                adj += self.w["question"]; reasons.append("yes/no question asked")
-            if pl in recent:
-                adj += self.w["recent"]; reasons.append("repeated recently")
-            out.append({"phrase": p, "prior": adj, "reasons": reasons})
-        return out
 
 
 # LLM providers, all through the OpenAI-compatible chat API: (key variable, base URL, default model). Grok default: the fastest

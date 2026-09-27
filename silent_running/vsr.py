@@ -5,9 +5,8 @@ Pingchuan Ma; weights mirrored on HF by Amanvir) via Chaplin's vendored ESPnet p
 
 Exposes three levels of output from the *same* video encoding:
   * beam_search(enc)          -> open-vocabulary n-best hypotheses with model scores
-  * score_phrases(enc, list)  -> exact model log-likelihood of each candidate phrase
-                                 (teacher-forced attention decoder + CTC forward), for
-                                 constrained decoding against a phrase inventory
+  * score_phrases(enc, list)  -> exact model log-likelihood of each text (teacher-forced attention
+                                 decoder + CTC forward): verifies the LLM's proposals against the video
   * ctc_greedy(enc)           -> instant, cheap transcript
 """
 import os, sys, time, threading, copy, contextlib
@@ -40,7 +39,6 @@ import sentencepiece  # noqa: E402
 MODEL_DIR = os.path.join(ROOT, "models", "LRS3_V_WER19.1")
 SPM_MODEL = os.path.join(ROOT, "third_party", "auto_avsr", "spm", "unigram", "unigram5000.model")
 LM_DIR = os.path.join(ROOT, "models", "lm_en_subword")
-PREFILTER = 48  # phrases rescored by the attention decoder after the CTC prefilter
 
 
 def _round_up(n, m):
@@ -119,37 +117,22 @@ class VSREngine:
                 torch.mps.synchronize()
         return enc
 
-    def internal_lm(self, phrases, frames=60):
-        """Log-likelihood the attention decoder gives each phrase with no visual evidence (an all-zero encoder output): its
-        internal language model, learned from TED transcripts. It is why "I don't know", "Thank you", "Sorry" and "Okay"
-        win whenever the lips are ambiguous. It depends on the phrase only (rank correlation 1.0 between 30 and 90 null
-        frames), so it is computed once per inventory."""
-        null = torch.zeros(frames, self.model.adim)
-        return {r["phrase"]: r["att"] for r in self._score_phrases_full(null, list(phrases))}
-
-    def warmup(self, phrases=(), n_frames=50):
-        """Run the live path's kernels once. On the GPU, every new shape of a phrase-scoring call builds and compiles its
-        kernels (0.1-0.7 s once, measured); _score_phrases_full pads its calls to a few shapes, and these run here for
-        utterances up to 7 s: the free transcript (batch 1), a check of a few texts (batch 2-8, Open Mode's LLM proposal),
-        and with the phrase inventory, its shortlist (plus up to 7 enrolled phrases outside it) at its phrase lengths.
-        That adds ~8 s to startup (M2)."""
+    def warmup(self, n_frames=50):
+        """Run the live path's kernels once. On the GPU, every new shape of a scoring call builds and compiles its kernels
+        (0.1-0.7 s once, measured); _score_phrases_full pads its calls to a few shapes, and these run here for utterances
+        up to 7 s: the free transcript (batch 1) and the LLM's proposals with the raw reading (batch 2-8)."""
         x = torch.zeros(1, n_frames, 88, 88)
         enc = self.encode(x)
         self.ctc_greedy(enc)
         self.score_phrases(enc, ["warm up"])
         if self.score_device.type != "mps":
             return
-        shortlist = min(PREFILTER, len(phrases))
-        longest = max((len(self.tokenize(p)) for p in phrases), default=0) + 1
         text = lambda L: " ".join(["A"] * (L - 1))  # "A A ... A" is L - 1 tokens
         for T in range(16, 177, 16):  # encoder frames (25 fps)
             e = torch.zeros(T, enc.shape[1])
             for L in range(8, 49, 8):
                 self._score_phrases_full(e, [text(L)])
                 self._score_phrases_full(e, [text(L)] * 2)
-            for B in ((shortlist, shortlist + 1) if shortlist else ()):
-                for L in range(8, _round_up(longest, 8) + 1, 8):
-                    self._score_phrases_full(e, [text(L)] * B)
 
     def _ids_to_text(self, ids):
         return "".join(self.token_list[i] for i in ids if i not in (0, self.eos)).replace("▁", " ").strip()
@@ -179,56 +162,21 @@ class VSREngine:
         return [self.tok2id.get(p, self.tok2id["<unk>"]) for p in pieces]
 
     @torch.no_grad()
-    def ctc_scores(self, enc, phrases):
-        """CTC log-likelihood of each phrase (cheap, vectorized). Used to prefilter big inventories."""
-        return _ctc_ll(self.model.ctc.log_softmax(enc.unsqueeze(0))[0], [self.tokenize(p) for p in phrases]).tolist()
-
-    @torch.no_grad()
-    def score_phrases(self, enc, phrases, prefilter=PREFILTER, always=(), extra=()):
-        """Exact log p(phrase | video) under the pretrained model for every candidate phrase.
-
-        Returns list of dicts sorted by combined score (descending):
+    def score_phrases(self, enc, phrases):
+        """Exact log p(text | video) under the pretrained model for each text, sorted by combined score (descending):
           {phrase, att: attention-decoder log-lik, ctc: CTC log-lik, score: (1-w)*att + w*ctc, n_tok}
-        Same weighting the beam search uses, so scores are comparable to beam hypotheses.
-        With a big inventory, only the top `prefilter` phrases by CTC score get the (expensive) attention decoder;
-        the rest are returned with a CTC-only estimate flagged `prefiltered_out`. Phrases in `always` (the ones an enrolled
-        patient's templates support, see decoder.py) get the attention decoder whatever their CTC rank.
-        Texts in `extra` (e.g. the free transcript) are scored in full too, in rows flagged `extra`: in the same decoder
-        pass when they are no longer than its longest phrase (the same compiled shape), else in a pass of their own.
-        """
-        phrases, extra = list(phrases), list(extra)
-        ctc = self.ctc_scores(enc, phrases + extra)  # one CTC pass; the shortlist's scores are reused, not recomputed
-        if prefilter and len(phrases) > prefilter:
-            order = sorted(range(len(phrases)), key=lambda i: -ctc[i])
-            keep = order[:prefilter]
-            keep += [i for i, p in enumerate(phrases) if p in always and i not in keep]
-        else:
-            order, keep = [], list(range(len(phrases)))
-        longest = max((len(self.tokenize(phrases[i])) for i in keep), default=0)
-        along = [j for j, e in enumerate(extra) if len(self.tokenize(e)) <= longest]
-        alone = [j for j in range(len(extra)) if j not in along]
-        rows = self._score_phrases_full(enc, [phrases[i] for i in keep] + [extra[j] for j in along],
-                                        [ctc[i] for i in keep] + [ctc[len(phrases) + j] for j in along])
-        if alone:
-            rows += self._score_phrases_full(enc, [extra[j] for j in alone], [ctc[len(phrases) + j] for j in alone])
-        res, extras = rows[:len(keep)], [{**r, "extra": True} for r in rows[len(keep):]]
-        if order:
-            floor = min(r["score"] for r in res)
-            kept = set(keep)
-            for i in order[prefilter:]:
-                if i not in kept:
-                    res.append({"phrase": phrases[i], "att": None, "ctc": ctc[i], "score": min(ctc[i], floor) - 1.0, "n_tok": 0, "prefiltered_out": True})
-        return sorted(res + extras, key=lambda r: -r["score"])
+        Same weighting the beam search uses, so scores are comparable to beam hypotheses."""
+        return sorted(self._score_phrases_full(enc, list(phrases)), key=lambda r: -r["score"])
 
     @torch.no_grad()
-    def _score_phrases_full(self, enc, phrases, ctc=None):
-        """Rows in the order of `phrases`; `ctc`: their CTC log-likelihoods if already computed."""
+    def _score_phrases_full(self, enc, phrases):
+        """Rows in the order of `phrases`."""
         dev = self.score_device
         toks = [self.tokenize(p) for p in phrases]
         B, L, T = len(toks), max(len(t) for t in toks) + 1, enc.shape[0]
         if dev.type == "mps":
             # Pad to a few shapes that warmup() compiled: rows to a multiple of 8, tokens to 8, encoder frames to 16. Exact up to
-            # float rounding (< 1e-4 nats, scripts/check_scorer.py): padded rows are dropped, padded tokens come after each row's
+            # float rounding (< 1e-4 nats, measured on 400 MIRACL clips): padded rows are dropped, padded tokens come after each row's
             # end under the causal mask, padded frames are masked out of the attention.
             Bp, L, Tp = (B if B == 1 else _round_up(B, 8)), _round_up(L, 8), _round_up(T, 16)
         else:
@@ -252,15 +200,15 @@ class VSREngine:
             tok_lp = tok_lp.masked_fill(ys_out < 0, 0.0)
             att = tok_lp.sum(-1)[:B].cpu()  # (B,)
 
-        ctc = torch.tensor(ctc) if ctc is not None else _ctc_ll(self.model.ctc.log_softmax(enc.unsqueeze(0))[0], toks)
+        ctc = _ctc_ll(self.model.ctc.log_softmax(enc.unsqueeze(0))[0], toks)
         score = (1 - self.ctc_weight) * att + self.ctc_weight * ctc
         return [{"phrase": p, "att": float(att[b]), "ctc": float(ctc[b]), "score": float(score[b]), "n_tok": len(toks[b])} for b, p in enumerate(phrases)]
 
 
 def _ctc_ll(ctc_lp, toks):
     """CTC forward log-likelihood of each token sequence under the (T', V) log-probs. Only the blank's and the sequences'
-    own tokens enter the loss, so it runs over those columns (~290 for the inventory) instead of all 5000: the same numbers
-    bit for bit on the 204 phrases, 2x faster, and no (T', B, 5000) copy per call."""
+    own tokens enter the loss, so it runs over those columns instead of all 5000: the same numbers bit for bit (204
+    phrases), 2x faster, and no (T', B, 5000) copy per call."""
     vocab = sorted({0, *(i for t in toks for i in t)})
     col = {v: k for k, v in enumerate(vocab)}
     lp = ctc_lp[:, vocab].cpu().float()

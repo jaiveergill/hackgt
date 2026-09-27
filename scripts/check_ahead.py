@@ -3,29 +3,31 @@ Seconds, no server, no lock needed. Run from the workspace root:
 
     .venv/bin/python scripts/check_ahead.py
 
-The capture process's messages go down a fake camera pipe to the real CameraProcess reader, as in check_confirm_sm.py; the
-engine is a stub that reads "Yes" and takes `ENCODE_S` to encode. Cases:
+The capture process's messages go down a fake camera pipe to the real CameraProcess reader; the engine is a stub that
+reads `READING` and takes `ENCODE_S` to encode; the LLM is off (its verdict follows the result on its own thread). Cases:
   1. confirmed after the reading finished: one result, published only at the confirmation (nothing before it, not even a
      status), latency counted from the confirmation with the reading under "ahead"
   2. dropped (the mouth moved again): no event at all, no utterance number used
   3. confirmed while the reading still runs: the result follows the reading; latency.read = what ran after the confirmation
   4. an utterance that failed in the capture process (face not tracked): its error only once confirmed, nothing if dropped
   5. an utterance sent the old way (no `ahead`) still decodes at once
+  6. a critical reading ("I can't breathe", phrases.txt ' !'): the alert comes before the result whose speech it replaces
 Prints expected vs actual per check; exit code 0 = all passed.
 """
 import os, sys, time, multiprocessing as mp
 import numpy as np
 
 sys.path.insert(0, os.getcwd())
-from silent_running import server, confirm, camera_proc
+from silent_running import server, camera_proc
 from silent_running.context import ContextStore
 
 EVENTS = []
 server.broadcast = EVENTS.append  # capture what would go to the UI over /ws
 server._safe_timing = lambda enc, text: None  # word timing needs the real model
 server.context = ContextStore()
-server.confirm_loop = confirm.ConfirmLoop(server._confirm_emit, server._on_confirmed, timeout=0.5)
+server.STATE["llm_enabled"] = False
 ENCODE_S = 0.1
+READING = ["YES"]
 ok = True
 
 
@@ -51,14 +53,8 @@ def kinds():
 class StubEngine:
     def to_model_input(self, rois): return np.zeros((1, len(rois), 88, 88), np.float32)
     def encode(self, x): time.sleep(ENCODE_S); return "enc"
-    def ctc_greedy(self, enc): return "YES"
-
-
-class StubPhraseDecoder:  # a confident, in-inventory "Yes"
-    def decode(self, enc, free=None):
-        rows = [{"phrase": "Yes", "vsr_score": -1.0, "final_prob": 0.9}, {"phrase": "No", "vsr_score": -4.0, "final_prob": 0.1}]
-        return {"ranking": rows, "selected": "Yes", "confidence": 0.9, "margin": 3.0, "visual_top": "Yes", "context_changed_choice": False,
-                "free_score": -1.0}
+    def ctc_greedy(self, enc): return READING[0]
+    def beam_search(self, enc, n): return [{"text": READING[0], "score": -1.0}, {"text": "NO", "score": -4.0}]
 
 
 class FakePipeCamera(camera_proc.CameraProcess):
@@ -66,7 +62,7 @@ class FakePipeCamera(camera_proc.CameraProcess):
         self.conn, self.worker = mp.Pipe()
 
 
-server.engine, server.phrase_decoder = StubEngine(), StubPhraseDecoder()
+server.engine = StubEngine()
 cam = server.camera = FakePipeCamera()
 cam.on_auto_utterance, cam.on_ahead = server._on_auto_utterance, server._on_ahead  # wired as server._make_camera does
 rois = np.zeros((20, 96, 96), np.uint8)
@@ -84,13 +80,12 @@ check("1. nothing shown before the confirmation", [], kinds())
 t_confirm = time.time(); cam.worker.send(("ahead", 1, True))
 wait_for(lambda: "result" in kinds())
 res = next(e for e in EVENTS if e["type"] == "result")
-check("1. status processing, raw, result, decision, idle", ["status:processing", "raw", "status:idle", "result", "decision"], kinds()[:5])
+check("1. status processing, raw, idle, result", ["status:processing", "raw", "status:idle", "result"], kinds()[:4])
 check("1. one utterance number used", uid0 + 1, res["utt_id"])
 check("1. latency: lock and read (0: it was done), total from the confirmation", (["lock", "read", "total"], 0.0, True),
       (list(res["latency"]), res["latency"]["read"], res["latency"]["total"] < 0.05))
 check("1. the reading's own stages under ahead, done before the end", (True, True),
-      ({"crop", "encode", "phrase"} <= set(res["ahead"]), res["ahead"]["before_end"] > 0))
-server.confirm_loop.cancel()
+      ({"crop", "encode", "beam"} <= set(res["ahead"]), res["ahead"]["before_end"] > 0))
 
 # ---------------------------------------------------------------- 2. dropped
 EVENTS.clear(); uid0 = server.STATE["utt_id"]
@@ -105,7 +100,6 @@ wait_for(lambda: "result" in kinds())
 res = next(e for e in EVENTS if e["type"] == "result")
 check("3. confirmed mid-reading: the result follows it, read > 0 counted in the total", (True, True, True),
       (res["latency"]["read"] > ENCODE_S / 2, res["latency"]["total"] >= res["latency"]["read"], res["ahead"]["before_end"] < 0))
-server.confirm_loop.cancel()
 
 # ---------------------------------------------------------------- 4. a failed utterance
 EVENTS.clear()
@@ -123,9 +117,16 @@ EVENTS.clear(); uid0 = server.STATE["utt_id"]
 utterance(None)
 wait_for(lambda: "result" in kinds())
 res = next((e for e in EVENTS if e["type"] == "result"), {})
-check("5. not sent ahead: decoded at once, latency by stage", (uid0 + 1, ["lock", "crop", "encode", "phrase", "total"]),
+check("5. not sent ahead: decoded at once, latency by stage", (uid0 + 1, ["lock", "crop", "encode", "beam", "total"]),
       (res.get("utt_id"), list(res.get("latency", {}))))
 check("5. no pending read-ahead left", {}, server.AHEAD)
+
+# ---------------------------------------------------------------- 6. a critical reading
+EVENTS.clear(); READING[0] = "I CAN'T BREATHE"
+utterance(6); time.sleep(0.02); cam.worker.send(("ahead", 6, True))
+wait_for(lambda: "result" in kinds())
+check("6. critical: the alert, then the result", (["alert", "result"], "I can't breathe"),
+      ([k for k in kinds() if k in ("alert", "result")], next((e["text"] for e in EVENTS if e["type"] == "alert"), None)))
 
 print("\nCHECK_AHEAD " + ("PASSED" if ok else "FAILED"))
 sys.exit(0 if ok else 1)

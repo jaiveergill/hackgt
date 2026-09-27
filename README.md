@@ -5,8 +5,8 @@ recognizes it with a pretrained visual speech recognition (VSR) model and speaks
 
 ```
 webcam → MediaPipe face tracking → mouth ROI (96×96, 25 fps) → Auto-AVSR visual conformer (LRS3, 19.1% WER)
-      → { CTC greedy | beam-search n-best | exact log-likelihood of every inventory phrase }
-      → contextual reranking (transparent prior; optional local LLM chooser) → selected text → TTS
+      → { CTC greedy | beam-search n-best } → the LLM (Grok) proposes what was meant, with the context
+      → the visual model verifies each proposal against the video → the verified sentence → TTS
 ```
 
 No audio is captured or used anywhere. No lip-reading model was trained; see `RESEARCH.md` for the model
@@ -22,7 +22,7 @@ uv pip install -r requirements.txt
 python -m silent_running.server            # http://127.0.0.1:8000
 ```
 
-Open Mode's interpreter is Grok by default (`XAI_API_KEY=...` in `.env`, model `grok-4.20-0309-non-reasoning`); `--llm-provider openai` uses `OPENAI_API_KEY` and `gpt-4o-mini`. It proposes up to 3 sentences the patient most plausibly meant, the lip model scores each against the video, and the most likely one within 3 nats of the raw reading is used (none: the raw reading stands). It never runs on the Phrase Mode path.
+The interpreter is Grok by default (`XAI_API_KEY=...` in `.env`, model `grok-4.20-0309-non-reasoning`); `--llm-provider openai` uses `OPENAI_API_KEY` and `gpt-4o-mini`. It proposes up to 3 sentences the patient most plausibly meant, the lip model scores each against the video, and the most likely one within 3 nats of the raw reading is used (none: the raw reading stands).
 Voice output: browser voices by default; with `ELEVEN_LABS_API_KEY` in `.env` the UI lists ElevenLabs stock voices (`--voice Bella`), and cloned voices once the account tier allows Instant Voice Cloning (see `plans/PLAN_3_VOICE_CLONING.md`).
 
 ## ESP32-CAM glasses: use the USB cable, not WiFi
@@ -82,16 +82,14 @@ python scripts/captures.py rescore    # re-read every labelled clip with this ch
 
 ## Using the UI
 
-* **Phrase Mode** (primary demo): hold **HOLD TO LISTEN** (or the space bar), silently mouth one of the phrases
-  in `silent_running/phrases.txt`, release. Within ~0.5 s the top phrase appears in large type and is spoken.
-  The candidate list shows, per phrase, the visual-only probability (grey bar) and the context-adjusted
-  probability (green bar) with the reasons for any adjustment. A "weak match" pill appears when the model's own
-  free transcript fits the video much better than any inventory phrase.
-* **Open Mode**: same capture, but the open-vocabulary beam search n-best is shown with probabilities. Then the
-  OpenAI model *proposes* one corrected sentence from those hypotheses plus the context, and the visual model *verifies*
-  it by scoring the proposal against the video; it is accepted only within 3 nats of the raw top hypothesis. The UI shows
-  the proposal, the verdict and the score gap. Raw model output is always displayed. Measured on a captioned TED clip:
-  WER 0.273 raw, 0.227 after verified correction (`plans/PLAN_1_LLM_CONTEXT.md`).
+* Hold **HOLD TO LISTEN** (or the space bar), silently mouth anything, release (or turn on hands-free listening).
+  The lip-reading model's beam search n-best appears with probabilities; the LLM (Grok) *proposes* up to 3 sentences the
+  patient most plausibly meant from those hypotheses plus the context, and the visual model *verifies* them by scoring each
+  against the video: the most likely one within 3 nats of the raw top hypothesis is spoken, else the raw top. The UI shows
+  the proposals, the verdict, the score gaps and the LLM's reason. Raw model output is always displayed. Measured on a
+  captioned TED clip: WER 0.273 raw, 0.227 after verified correction (`plans/PLAN_1_LLM_CONTEXT.md`).
+* **Critical phrases**: when what the patient is about to be heard saying is one of the critical phrases in
+  `silent_running/phrases.txt` (marked ` !`, e.g. "I can't breathe"), a full-screen alert announces it twice, urgently.
 * **Expressive delivery** (`plans/PLAN_4_EXPRESSIVE_DELIVERY.md`): with an ElevenLabs voice selected, your face sets the emotion
   ("match my face": MediaPipe blendshapes -> angry / warm / sad / surprised + intensity -> v3 audio tag + stability), and with
   "match my pace" (off by default: aligning the audio delays the voice, `plans/PLAN_5_LATENCY.md`; its 1.5 GB voice aligner loads
@@ -101,8 +99,8 @@ python scripts/captures.py rescore    # re-read every labelled clip with this ch
   phrase the server has cached); other text streams from ElevenLabs as it is generated (`/api/tts_stream`).
   The delivery panel shows mouthed-vs-delivered word strips and "replay as" buttons for side-by-side judging.
   Clone your own voice from a recording session with `POST /api/voice/clone?speaker=<name>` (Creator tier or higher).
-* **Context panel**: what the nurse just asked (yes/no questions boost Yes/No), a patient category, free-text
-  notes (keyword overlap boosts phrases), and recent history. Context only re-weights VSR-supported candidates.
+* **Context panel**: what the nurse just asked, a topic, free-text notes, and recent history, all sent to the LLM with the
+  lip readings. The LLM only proposes; the visual model decides what the video supports.
 * **Eval drawer**: save the last 6 s of webcam as a labelled sample for `scripts/eval.py`.
 * **Hands-free listening** ends an utterance once the mouth has been still for 0.35 s (`SR_AUTO_HANG` to change it;
   `scripts/eval_hang.py` measures splits and false triggers per value). Its frames are fixed 0.15 s into that stillness,
@@ -118,7 +116,7 @@ python scripts/captures.py rescore    # re-read every labelled clip with this ch
 
 * Face the camera squarely, ~40-60 cm away, mouth well lit from the front (no backlight).
 * Watch **mouth N/45 px** on the camera badge: the mouth's width in camera pixels vs the 45 px the model's crop reads.
-  Amber (under 45) means the crop is upsampled, i.e. blurred: move closer or zoom in. Half the pixels cut Phrase Mode
+  Amber (under 45) means the crop is upsampled, i.e. blurred: move closer or zoom in. Half the pixels cut phrase
   top-1 from 64% to 38% on MIRACL clips. Each result, the session log and the capture log record it too.
 * ESP32-CAM zoom: the **1x / 2x** toggle on the camera view, or `window=2x` in the source spec (`serial?window=2x`,
   `stream:172.20.10.2?window=2x`). 2x makes the OV3660 read only the centre half of its view, 2x the pixels across the
@@ -136,13 +134,12 @@ python scripts/captures.py rescore    # re-read every labelled clip with this ch
 python scripts/record_samples.py --speaker alice --reps 2       # prompts each phrase, saves data/eval/...
 python scripts/eval.py --tag baseline --device mps               # results/baseline.jsonl + results/summary.jsonl
 ```
-Each result line has the raw transcript, n-best, the phrase ranking, top-1/top-3 correctness and per-stage latency.
+Each result line has the raw transcript (beam top), n-best, top-1/top-3 correctness (in the beam's top 3) and per-stage latency.
 
 ## Layout
 
-* `silent_running/vsr.py` – engine: preprocessing, encoder (MPS), CTC greedy, beam search, **phrase scoring**
-* `silent_running/decoder.py` – phrase-constrained decoder combining VSR log-likelihood with the context prior
-* `silent_running/context.py` – context store, transparent prior, OpenAI chooser
+* `silent_running/vsr.py` – engine: preprocessing, encoder (MPS), CTC greedy, beam search, scoring of texts (verification)
+* `silent_running/context.py` – context store and the LLM interpreter (Grok / OpenAI)
 * `silent_running/camera.py` – capture thread with per-frame face tracking and 25 fps utterance resampling
 * `silent_running/server.py` – FastAPI app (MJPEG preview, websocket events, `/api/decode_file`)
 * `silent_running/static/index.html` – bedside UI
