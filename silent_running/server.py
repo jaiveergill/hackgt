@@ -191,7 +191,6 @@ def run_decode(rois, duration, source="webcam", label=None, t_crop=0.0, expressi
             _patient_final(result["selected"], uid, probs[0])
         set_status("idle")
         broadcast({"type": "result", **result, "latency": latency})
-        context.add_history(nbest[0]["text"])
         _log("patient", result["selected"], confidence=probs[0], emotion=(expression or {}).get("emotion"))
         if interpret:
             threading.Thread(target=_bg_llm, args=(nbest, uid, enc, probs[0]), daemon=True).start()
@@ -242,8 +241,11 @@ CATEGORY_OF = {_norm(r["phrase"]): r["category"] for r in PHRASE_TABLE}
 
 
 def _patient_final(text, uid, confidence):
-    """What the patient is about to be heard saying is settled: onto the nurse board's bed transcript, and the full-screen
-    alert (the UI announces it twice, urgently) if it is a critical phrase. Sent before the event whose speech it replaces."""
+    """What the patient is about to be heard saying is settled: into the history (the next utterance's context; never the
+    utterance still being interpreted, or the LLM is told the raw reading was already said and repeats it), onto the nurse
+    board's bed transcript, and the full-screen alert (the UI announces it twice, urgently) if it is a critical phrase. Sent
+    before the event whose speech it replaces."""
+    context.add_history(text)
     critical = _norm(text) in CRITICAL
     if unit:
         unit.patient_said(unit.real_bed, text, CATEGORY_OF.get(_norm(text)), critical, confidence)
