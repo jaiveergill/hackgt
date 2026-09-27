@@ -36,6 +36,10 @@ delivery, alert, stall/reopen and error. Summarize a session with:
 python scripts/session_report.py              # latest session
 python scripts/session_report.py --events     # plus a timeline of decodes, stalls and errors
 ```
+For a network camera it also shows the stream's demand (Mbit/s, KB per frame): freezes start where the WiFi link's capacity
+drops below it (e.g. a head shadowing the ESP32's antenna). To compare stream settings on the real link, wear the glasses
+and run `python scripts/bench_link.py 172.20.10.2`: current vs `window=2x` vs `window=2x&quality=20`, in alternating
+rounds, with frame rate, freezes per minute, Mbit/s, pings and mouth pixels per setting.
 
 ## Capture log: shared recognition data (commit this one)
 

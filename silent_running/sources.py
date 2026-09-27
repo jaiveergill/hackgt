@@ -321,7 +321,8 @@ class StreamSource(VideoSource):
         self._frame, self._ts, self._seq, self._got = None, 0.0, 0, 0
         self._stop, self._thread, self._err, self._resp = False, None, None, None
         self.width = self.height = 0
-        self.fps_est = 0.0
+        self.fps_est = self.mbps_est = 0.0
+        self.frame_bytes = 0
         self.full = None     # frame size of the whole view, measured on the first open: the window's geometry
         self.window = None   # its /resolution parameters
 
@@ -405,7 +406,7 @@ class StreamSource(VideoSource):
 
     def _reader(self, resp):
         import cv2, numpy as np
-        buf = bytearray(); t_last, n = time.time(), 0
+        buf = bytearray(); t_last, n, nbytes = time.time(), 0, 0
         try:
             while not self._stop:
                 chunk = resp.read1(65536)   # whatever is available now; read(n) would block until n bytes = ~2 frames
@@ -424,10 +425,11 @@ class StreamSource(VideoSource):
                     img = cv2.imdecode(np.frombuffer(jpg, np.uint8), cv2.IMREAD_COLOR)
                     if img is not None:
                         self._frame, self._ts, self._seq = img, time.time(), self._seq + 1
-                        self.height, self.width = img.shape[:2]
-                        n += 1
-                        if self._ts - t_last >= 2.0:
-                            self.fps_est, t_last, n = n / (self._ts - t_last), self._ts, 0
+                        self.height, self.width, self.frame_bytes = img.shape[0], img.shape[1], len(jpg)
+                        n += 1; nbytes += len(jpg)
+                        if self._ts - t_last >= 2.0:  # what the link carried: a stream needing more than it can carry freezes
+                            dt = self._ts - t_last
+                            self.fps_est, self.mbps_est, t_last, n, nbytes = n / dt, nbytes * 8 / dt / 1e6, self._ts, 0, 0
         except Exception as e:
             self._err = f"stream read failed: {e}"
         finally:
@@ -464,7 +466,8 @@ class StreamSource(VideoSource):
             self._thread.join(timeout=1.0)
 
     def info(self):
-        return {**super().info(), "url": self.url, "fps": round(self.fps_est, 1), "width": self.width, "height": self.height, "settings": self.settings,
+        return {**super().info(), "url": self.url, "fps": round(self.fps_est, 1), "mbps": round(self.mbps_est, 2),
+                "frame_kb": round(self.frame_bytes / 1024, 1), "width": self.width, "height": self.height, "settings": self.settings,
                 **({"zoom": self.zoom, "full": self.full, "window": self.window} if self.zoom else {})}
 
 
