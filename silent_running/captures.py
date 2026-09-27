@@ -8,8 +8,8 @@ Layout (commit it: `git add data/captures && git push`; teammates' sessions neve
   data/captures/clips/<session>/<utt>.mkv  the 96x96 grayscale mouth crops the model read, 25 fps, lossless (bit-exact)
 
 Line types: "session" (first line: host, code version, camera, inventory, scoring settings), "utterance" (clip, source,
-frames), and the UI events as broadcast: "result" (ranking trimmed to the top 10), "decision", "confirm", then "label"
-(the corrected text). scripts/captures.py reads them back, re-scores labelled clips with the current code, and reports.
+frames), and the UI events as broadcast: "result" (the beam's reading), "llm" (the LLM's verdict), then "label" (the
+corrected text). scripts/captures.py reads them back, re-scores labelled clips with the current code, and reports.
 Only camera sources (webcam/usb/stream/serial, e.g. the ESP32-CAM) are captured by default; SR_CAPTURE=all adds live file playback (e.g. a phone recording
 replayed with --source file:...); SR_CAPTURE=0 turns capture off. /api/decode_file is never captured.
 """
@@ -19,8 +19,7 @@ import numpy as np
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DIR = os.path.join(ROOT, "data", "captures")
-EVENT_TYPES = {"result", "decision", "confirm"}
-TOP = 10  # ranking rows kept per result (the inventory can have 200+)
+EVENT_TYPES = {"result", "llm"}
 
 
 def _git_commit():
@@ -62,11 +61,8 @@ class CaptureLog:
             self._write({"type": "error", "message": f"clip not saved ({path}): {r.stderr.decode(errors='replace').strip()}"})
 
     def event(self, msg):
-        if msg.get("type") not in EVENT_TYPES or msg.get("utt_id") not in self.utts:
-            return
-        if msg["type"] == "result" and msg.get("ranking"):
-            msg = {**msg, "ranking": msg["ranking"][:TOP]}
-        self._write(msg)
+        if msg.get("type") in EVENT_TYPES and msg.get("utt_id") in self.utts:
+            self._write(msg)
 
     def label(self, utt_id, text, by):
         if int(utt_id) not in self.utts:
@@ -84,7 +80,7 @@ def read_clip(path):
 
 
 def load_sessions(root=DIR):
-    """{session: {"meta": {...}, "utts": {utt_id: {"utterance", "result", "decision", "confirm": [...], "label"}}}}"""
+    """{session: {"meta": {...}, "utts": {utt_id: {"utterance", "result", "llm", "label"}}}}"""
     out = {}
     for fn in sorted(os.listdir(root)) if os.path.isdir(root) else []:
         if not fn.endswith(".jsonl"):
@@ -97,10 +93,6 @@ def load_sessions(root=DIR):
                 continue
             if "utt_id" not in rec:
                 continue
-            u = sess["utts"].setdefault(rec["utt_id"], {"confirm": []})
-            if rec["type"] == "confirm":
-                u["confirm"].append(rec)
-            else:
-                u[rec["type"]] = rec  # a later label replaces an earlier one
+            sess["utts"].setdefault(rec["utt_id"], {})[rec["type"]] = rec  # a later label replaces an earlier one
         out[fn[:-len(".jsonl")]] = sess
     return out

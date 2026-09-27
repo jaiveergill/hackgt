@@ -3,7 +3,6 @@ with the current code, so a change is judged on our own silent mouthing from our
 
     python scripts/captures.py stats              sessions, utterances, labels; accuracy at the time; top confusions
     python scripts/captures.py rescore            re-read labelled clips with this checkout's code: fixed / broken / same
-    SR_ILM_WEIGHT=0.3 python scripts/captures.py rescore     the same with other scoring settings
 
 rescore loads the lip-reading model, so it holds the machine-wide lock like smoke.py.
 """
@@ -15,14 +14,14 @@ from silent_running import captures
 
 
 def labelled(sessions):
-    """[(session, utt_id, label, what the system said then, clip, its lips-only pick then)] per corrected utterance."""
+    """[(session, utt_id, label, what the system said then, clip, the lips' reading then)] per corrected utterance."""
     out = []
     for name, s in sessions.items():
         for uid, u in sorted(s["utts"].items()):
             if "label" in u and "utterance" in u:
                 r = u.get("result") or {}
-                said = (u.get("decision") or {}).get("text") or r.get("selected")
-                out.append((name, uid, u["label"]["text"], said, os.path.join(captures.DIR, u["utterance"]["clip"]), r.get("visual_top")))
+                said = (u.get("llm") or {}).get("corrected") or r.get("selected")
+                out.append((name, uid, u["label"]["text"], said, os.path.join(captures.DIR, u["utterance"]["clip"]), r.get("selected")))
     return out
 
 
@@ -42,39 +41,36 @@ def stats(sessions):
 
 
 def rescore(sessions):
-    from silent_running.vsr import VSREngine, load_phrases
-    from silent_running.decoder import PhraseDecoder
-    from silent_running.context import ContextStore
+    """Re-read every labelled clip with this checkout (the beam's top reading, before the LLM) and compare with the label."""
+    from silent_running.vsr import VSREngine
     rows = labelled(sessions)
     if not rows:
         sys.exit("no labelled utterances in data/captures yet: correct some results in the UI first")
     lock = open(os.path.expanduser("~/.cache/silent_running/smoke.lock"), "w")
     fcntl.flock(lock, fcntl.LOCK_EX)
-    phrases = load_phrases()
-    engine = VSREngine()
-    engine.warmup(phrases)
-    dec = PhraseDecoder(engine, phrases, ContextStore())  # no context: judges the lips (and scoring) alone
-    inv = {p.lower() for p in phrases}
+    engine = VSREngine(beam_size=10)
+    engine.warmup()
+    same_as = lambda a, b: norm(a) == norm(b)
     tally = collections.Counter()
     same = total = 0
     for name, uid, lab, said, clip, lips_then in rows:
-        pick = dec.decode(engine.encode(engine.to_model_input(captures.read_clip(clip))))["selected"]
-        if lips_then is not None:  # same code and inventory => same lips-only pick: proves the clip round-trips bit-exact
-            total += 1; same += pick == lips_then
-        if lab.lower() not in inv:
-            tally["label not in the phrase list"] += 1
-            continue
-        # judged against the lips-only pick then (before context), so a context boost is not mistaken for a code change
-        was, now = (lips_then or said or "").lower() == lab.lower(), pick.lower() == lab.lower()
+        nbest = engine.beam_search(engine.encode(engine.to_model_input(captures.read_clip(clip))), 5)
+        pick = nbest[0]["text"] if nbest else ""
+        if lips_then is not None:  # same code => same reading: proves the clip round-trips bit-exact
+            total += 1; same += same_as(pick, lips_then)
+        # judged against the lips' reading then (before the LLM), so an LLM correction is not mistaken for a code change
+        was, now = same_as(lips_then or said or "", lab), same_as(pick, lab)
         kind = {(False, True): "fixed", (True, False): "BROKEN", (True, True): "right both", (False, False): "wrong both"}[(was, now)]
         tally[kind] += 1
         if was != now:
             print(f"  {kind:6s} {name} #{uid}: actually {lab!r}; then {said!r}, now {pick!r}")
-    n = sum(v for k, v in tally.items() if k != "label not in the phrase list")
-    right_now = tally["fixed"] + tally["right both"]
-    print(f"rescored {n} labelled utterances: right now {right_now}/{n}, then {tally['BROKEN'] + tally['right both']}/{n} | {dict(tally)}")
-    print(f"same lips-only pick as logged: {same}/{total} (all, when this checkout matches the logging commit and settings)")
-    print("scoring settings:", {k: v for k, v in os.environ.items() if k.startswith("SR_")} or "defaults")
+    n = sum(tally.values())
+    print(f"rescored {n} labelled utterances: right now {tally['fixed'] + tally['right both']}/{n}, then {tally['BROKEN'] + tally['right both']}/{n} | {dict(tally)}")
+    print(f"same reading as logged: {same}/{total} (all, when this checkout matches the logging commit)")
+
+
+def norm(s):
+    return " ".join("".join(c for c in s.lower() if c.isalnum() or c in " '").split())
 
 
 if __name__ == "__main__":

@@ -54,7 +54,7 @@ def _jsonable(v):
 
 # fields worth keeping from each broadcast event type (everything else in the event is UI payload)
 _KEEP = {
-    "result": ("utt_id", "mode", "selected", "confidence", "margin", "n_frames", "duration", "source", "latency", "ahead", "in_inventory", "phrase_gap", "raw_greedy", "critical", "mouth_px"),
+    "result": ("utt_id", "selected", "confidence", "n_frames", "duration", "source", "latency", "ahead", "raw_greedy", "mouth_px"),
     "delivery": ("utt_id", "cached", "streamed", "t_synth", "total", "model"),
     "alert": ("utt_id", "text", "confidence"),
     "error": ("utt_id", "message"),
@@ -63,7 +63,7 @@ _KEEP = {
     "nbest": ("utt_id", "error"),
     "llm": ("utt_id", "accepted", "changed", "latency", "error"),
     "llm_reason": ("utt_id", "latency", "error"),
-    "confirm": None, "signal": None, "enroll": None, "log": None,
+    "signal": None, "log": None,
 }
 
 
@@ -77,6 +77,4 @@ def from_broadcast(msg):
         fields = {k: v for k, v in msg.items() if k != "type" and isinstance(v, (str, int, float, bool, type(None)))}
     else:
         fields = {k: msg[k] for k in keep if k in msg}
-        if t == "result" and "ranking" in msg and msg["ranking"]:
-            fields["top"] = [[r.get("phrase"), round(r.get("final_prob", 0), 3)] for r in msg["ranking"][:3]]
     log(t, **fields)

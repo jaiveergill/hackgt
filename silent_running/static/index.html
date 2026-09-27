@@ -21,7 +21,6 @@ const V=Date.now();document.write(`<link rel="stylesheet" href="/static/app.css?
   <div class="warmup" id="warmup" hidden title="The voice-timing model is still loading; decodes can take several seconds until it finishes">warming up · first reads are slower</div>
   <div class="statuspill idle" id="statuspill"><i></i><span>idle</span></div>
   <div class="toggle tabs" id="tabs"><button data-tab="patient" class="on">Patient</button><button data-tab="dev">Dev</button></div>
-  <div class="toggle" id="mode"><button data-mode="phrase" class="on">Phrase</button><button data-mode="open">Open</button></div>
 </header>
 <main>
 <!-- ============================ PATIENT TAB ============================ -->
@@ -75,7 +74,7 @@ const V=Date.now();document.write(`<link rel="stylesheet" href="/static/app.css?
 
     <div class="hero" id="hero" data-state="idle" data-src="lips">
       <div class="ring">
-        <svg viewBox="0 0 120 120"><circle class="track" cx="60" cy="60" r="52"/><circle class="arc" id="ringarc" cx="60" cy="60" r="52"/><circle class="cd" id="ringcd" cx="60" cy="60" r="44"/></svg>
+        <svg viewBox="0 0 120 120"><circle class="track" cx="60" cy="60" r="52"/><circle class="arc" id="ringarc" cx="60" cy="60" r="52"/></svg>
         <div class="pct" id="ringpct">—</div>
         <div class="ringlbl">confidence</div>
       </div>
@@ -83,11 +82,6 @@ const V=Date.now();document.write(`<link rel="stylesheet" href="/static/app.css?
         <div class="eyebrow"><span class="src" id="src">lips</span><span id="eyebrow">Waiting for the patient</span></div>
         <div class="text placeholder" id="bigtext">Hold Listen and mouth a phrase</div>
         <div class="reason" id="reason"></div>
-        <div class="confirmbar">
-          <div class="cdbar"><i id="cdfill"></i></div>
-          <div class="confirmrow"><span id="confirmhint">Nod to confirm · shake for the next guess</span>
-            <button class="yes" id="cyes">✓ Yes</button><button class="no" id="cno">✗ No</button></div>
-        </div>
         <div class="conf" id="conf"></div>
         <div class="alts" id="alts"></div>
         <div class="labelrow" id="labelrow" hidden>
@@ -123,7 +117,7 @@ const V=Date.now();document.write(`<link rel="stylesheet" href="/static/app.css?
 <section class="tab" id="tab-dev">
   <div class="col">
     <div class="panel">
-      <h3>Context (adjusts ranking, never invents phrases)</h3>
+      <h3>Context (sent to the LLM with the lips' readings)</h3>
       <div class="ctxform">
         <div><label>Nurse just said / asked</label><input id="prompt" placeholder="e.g. Do you want some water?"></div>
         <div><label>Patient category</label><select id="category"><option value="">— none —</option></select></div>
@@ -138,12 +132,8 @@ const V=Date.now();document.write(`<link rel="stylesheet" href="/static/app.css?
       <details><summary>eval</summary><div class="row" style="margin-top:6px"><input class="txt" id="speaker" placeholder="speaker" style="width:120px"><button class="btn" id="save">Save last 6 s as sample of selected phrase</button></div></details>
     </div>
     <div class="panel">
-      <h3>Candidate phrases · visual likelihood → with context</h3>
+      <h3>Beam n-best · the visual model's readings</h3>
       <div class="cands" id="cands"><div class="small">Waiting for an utterance…</div></div>
-    </div>
-    <div class="panel">
-      <h3>Decision</h3>
-      <div id="decision" class="small">No decision event yet.</div>
     </div>
     <div class="panel">
       <details><summary>Phrase inventory · <span id="nphr"></span></summary><div class="hist" id="phrlist" style="margin-top:8px"></div></details>
@@ -153,8 +143,6 @@ const V=Date.now();document.write(`<link rel="stylesheet" href="/static/app.css?
     <div class="panel">
       <h3>What the visual model actually saw</h3>
       <div class="raw mono" id="raw"><span class="lbl">raw</span><span class="small">—</span></div>
-      <div class="raw mono" id="nbest"></div>
-      <button class="btn sm" id="nbestbtn">Open-vocabulary beam n-best of the last utterance (~1 s)</button>
       <div class="lat" id="lat"></div>
     </div>
     <div class="panel">
@@ -163,7 +151,7 @@ const V=Date.now();document.write(`<link rel="stylesheet" href="/static/app.css?
       <div class="strip" id="strip"></div>
       <div class="replay" id="replay"></div>
     </div>
-    <div class="panel" id="llmpanel" style="display:none">
+    <div class="panel" id="llmpanel">
       <h3>Contextual decoding · LLM proposes, visual model verifies</h3>
       <div class="llm" id="llmout"></div>
     </div>
@@ -173,7 +161,7 @@ const V=Date.now();document.write(`<link rel="stylesheet" href="/static/app.css?
     </div>
     <div class="panel">
       <h3>Pipeline</h3>
-      <div class="small mono">camera → MediaPipe face + blendshapes + nonverbal signals (separate process) → 96×96 mouth crops @25fps → Auto-AVSR conformer (MPS) → CTC greedy + phrase scoring + beam n-best → context prior / LLM fusion + visual verify → confirm loop → ElevenLabs → play</div>
+      <div class="small mono">camera → MediaPipe face + blendshapes + nonverbal signals (separate process) → 96×96 mouth crops @25fps → Auto-AVSR conformer (MPS) → CTC greedy + beam n-best → LLM interpretation (Grok) + visual verify → ElevenLabs → play</div>
     </div>
   </div>
 </section>
