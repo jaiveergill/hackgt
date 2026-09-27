@@ -119,7 +119,7 @@ python scripts/captures.py rescore    # re-read every labelled clip with this ch
 * Hold **HOLD TO LISTEN** (or the space bar), silently mouth anything, release (or turn on hands-free listening).
   The lip-reading model's beam search n-best appears with probabilities; the LLM (Grok) *proposes* up to 3 sentences the
   patient most plausibly meant from those hypotheses plus the context, and the visual model *verifies* them by scoring each
-  against the video: the most likely one within 3 nats of the raw top hypothesis is spoken, else the raw top. The UI shows
+  against the video: the most likely one within 10 nats of the raw top hypothesis is spoken, else the raw top. The UI shows
   the proposals, the verdict, the score gaps and the LLM's reason. Raw model output is always displayed. Measured on a
   captioned TED clip: WER 0.273 raw, 0.227 after verified correction (`plans/PLAN_1_LLM_CONTEXT.md`).
 * **Critical phrases**: when what the patient is about to be heard saying is one of the critical phrases in

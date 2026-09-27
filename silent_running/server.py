@@ -29,7 +29,11 @@ STATIC = os.path.join(ROOT, "silent_running", "static")
 app = FastAPI(title="Silent Running")
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
 
-LLM_MARGIN = 3.0  # nats; an LLM proposal is accepted only if the visual model scores it within this of the raw top hypothesis
+# nats; an LLM proposal is accepted only if the visual model scores it within this of the raw top hypothesis. Grok keeps a
+# reading a patient would say first (gap 0), so this only limits its overrides: wide enough for the patient's meaning when the
+# lips were misread (I NEED MY CAKE -> I NEED MY MEDICATION: -8.7), narrow enough to stop what the lips contradict (pain on
+# my knee for an allergy: -14; GRAND GESTURES for HAND GESTURES: -11.3). It was 3, which rejected the medication reading.
+LLM_MARGIN = 10.0
 STATE = {"auto_listen": False, "voice": None, "expressive": True, "emotion_override": None, "llm_enabled": True, "status": "idle", "utt_id": 0, "warm": False, "pace": False}
 clients = set()
 loop = None
