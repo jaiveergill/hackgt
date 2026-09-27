@@ -187,17 +187,17 @@ def run_decode(rois, duration, source="webcam", label=None, t_crop=0.0, expressi
         result.update({"nbest": nbest, "selected": _pretty(nbest[0]["text"]), "confidence": probs[0], "context": context.snapshot(), "latency_total": latency["total"]})
         _prefetch_voice(result["selected"], result["expression"])
         interpret = STATE["llm_enabled"] and llm is not None
+        emotion = (expression or {}).get("emotion")
         if not interpret:  # the reading is final: an alert before the result, whose speech it replaces
-            _patient_final(result["selected"], uid, probs[0])
+            _patient_final(result["selected"], uid, probs[0], emotion)
         set_status("idle")
         broadcast({"type": "result", **result, "latency": latency})
-        _log("patient", result["selected"], confidence=probs[0], emotion=(expression or {}).get("emotion"))
         if interpret:
-            threading.Thread(target=_bg_llm, args=(nbest, uid, enc, probs[0]), daemon=True).start()
+            threading.Thread(target=_bg_llm, args=(nbest, uid, enc, probs[0], emotion), daemon=True).start()
         return result
 
 
-def _bg_llm(nbest, uid, enc, confidence):
+def _bg_llm(nbest, uid, enc, confidence, emotion):
     """The LLM PROPOSES up to 3 sentences the patient most plausibly meant (n-best + context), the visual model VERIFIES
     them in one batch against the video. The LLM's most likely proposal within LLM_MARGIN nats of the raw top hypothesis
     wins; none -> the raw top stands. Every proposal and the verdict are broadcast so the UI shows exactly what happened.
@@ -210,7 +210,7 @@ def _bg_llm(nbest, uid, enc, confidence):
     for kind, value in llm.propose_stream([{"text": h["text"], "score": h["score"]} for h in nbest], ctx):
         if kind == "error":
             if not verdict:  # the raw reading is what the UI says
-                _patient_final(_pretty(top), uid, confidence)
+                _patient_final(_pretty(top), uid, confidence, emotion)
             broadcast({"type": "llm_reason" if verdict else "llm", "utt_id": uid, "error": value, "latency": time.time() - t0})
             return
         if kind == "reason":
@@ -222,7 +222,7 @@ def _bg_llm(nbest, uid, enc, confidence):
         gaps = {p: sc[p] - sc[top] for p in props}
         chosen = next((p for p in props if gaps[p] >= -LLM_MARGIN), None)
         proposal = chosen or props[0]
-        _patient_final(_pretty(chosen or top), uid, confidence)
+        _patient_final(_pretty(chosen or top), uid, confidence, emotion)
         broadcast({"type": "llm", "utt_id": uid, "proposal": _pretty(proposal), "gap": gaps[proposal],
                    "accepted": chosen is not None, "changed": proposal != top, "corrected": _pretty(chosen or top),
                    "alternatives": [{"text": _pretty(p), "gap": gaps[p], "fits": gaps[p] >= -LLM_MARGIN} for p in props],
@@ -240,12 +240,13 @@ CRITICAL = {_norm(r["phrase"]) for r in PHRASE_TABLE if r["critical"]}  # phrase
 CATEGORY_OF = {_norm(r["phrase"]): r["category"] for r in PHRASE_TABLE}
 
 
-def _patient_final(text, uid, confidence):
+def _patient_final(text, uid, confidence, emotion):
     """What the patient is about to be heard saying is settled: into the history (the next utterance's context; never the
-    utterance still being interpreted, or the LLM is told the raw reading was already said and repeats it), onto the nurse
-    board's bed transcript, and the full-screen alert (the UI announces it twice, urgently) if it is a critical phrase. Sent
+    utterance still being interpreted, or the LLM is told the raw reading was already said and repeats it), the conversation
+    log, the nurse board's bed transcript, and the full-screen alert (the UI announces it twice, urgently) if it is a critical phrase. Sent
     before the event whose speech it replaces."""
     context.add_history(text)
+    _log("patient", text, confidence=confidence, emotion=emotion)
     critical = _norm(text) in CRITICAL
     if unit:
         unit.patient_said(unit.real_bed, text, CATEGORY_OF.get(_norm(text)), critical, confidence)

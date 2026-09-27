@@ -72,7 +72,9 @@ class LLMInterpreter:
         sys_p = ("You interpret the output of a silent lip-reading model for a voiceless ICU patient. You get the model's n-best "
                  "hypotheses (higher score = more visual support) plus any context. They are often garbled or ungrammatical: lip "
                  "reading confuses sounds that look alike on the lips (p/b/m, t/d/n, k/g, f/v, s/z, most vowels) and drops or merges "
-                 "short words. Write up to 3 natural sentences the patient most plausibly meant, most likely first, with similar mouth "
+                 "short words. The patient is in an ICU bed: what they say is almost always about their health, care, body, needs, "
+                 "feelings or family, so prefer that meaning when the mouth shapes allow it, but never invent one they do not "
+                 "support. Write up to 3 natural sentences the patient most plausibly meant, most likely first, with similar mouth "
                  "shapes; if the top hypothesis is not a sentence a person would say, do not repeat it. The lip model checks every "
                  "one against the video. Output plain text in upper case without punctuation.")
         lines = "\n".join(f"{i}. {c['text']} (score {c['score']:.1f})" for i, c in enumerate(candidates))
