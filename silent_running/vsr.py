@@ -151,6 +151,117 @@ class VSREngine:
                 for L in range(8, _round_up(longest, 8) + 1, 8):
                     self._score_phrases_full(e, [text(L)] * B)
 
+    # ------------------------------------------------------------------ ICU language model (shallow fusion + candidate rescoring)
+    def set_lm(self, lm, weight=0.3, rescore_weight=None):
+        """Plug an ESPnet scorer (silent_running.icu_lm.IcuNgramLM) into the beam search as "lm" with `weight`, and add
+        `rescore_weight` (default: same) x its sentence log-prob to every phrase/bank candidate score."""
+        bs = self.avsr.beam_search
+        self.lm, self.lm_weight = lm, float(weight)
+        self.lm_rescore_weight = float(weight if rescore_weight is None else rescore_weight)
+        if lm is None or weight <= 0:
+            for d in (bs.scorers, bs.full_scorers):
+                d.pop("lm", None)
+            bs.weights["lm"] = 0.0
+            return
+        bs.scorers["lm"] = lm; bs.full_scorers["lm"] = lm; bs.weights["lm"] = float(weight)
+
+    def lm_logprob(self, text):
+        return self.lm.sentence_logprob(text) if getattr(self, "lm", None) is not None else 0.0
+
+    # ------------------------------------------------------------------ long utterances: split at silences the CTC head sees
+    @torch.no_grad()
+    def segment_by_blanks(self, enc, min_blank=10, min_seg=12):
+        """Frame ranges [(a, b), ...] of the encoder output, cut in the middle of every run of >= min_blank blank-dominant frames
+        (40 ms each; 10 = 400 ms of still mouth). Segments shorter than min_seg frames are merged into their neighbour.
+        The attention decoder drifts on inputs much longer than the ~3 s clips it was trained on; decoding each sentence alone fixes that."""
+        lp = self.model.ctc.log_softmax(enc.unsqueeze(0))[0]
+        blank = (lp.argmax(-1) == 0).tolist()
+        T = len(blank)
+        cuts, run_start = [], None
+        for t, b in enumerate(blank + [False]):
+            if b and run_start is None:
+                run_start = t
+            elif not b and run_start is not None:
+                if t - run_start >= min_blank and run_start > 0 and t < T:
+                    cuts.append((run_start + t) // 2)
+                run_start = None
+        bounds = [0] + cuts + [T]
+        segs = [(a, b) for a, b in zip(bounds, bounds[1:]) if b > a]
+        merged = []
+        for a, b in segs:
+            if merged and (b - a < min_seg or merged[-1][1] - merged[-1][0] < min_seg):
+                merged[-1] = (merged[-1][0], b)
+            else:
+                merged.append((a, b))
+        return merged
+
+    @staticmethod
+    def collapse_loops(text, max_repeat=1):
+        """The attention decoder degenerates on long inputs into 'I CAN'T STOP I CAN'T STOP ...'. Collapse any n-gram (1-6 words)
+        repeated back-to-back more than max_repeat times. Returns (text, n_removed_words)."""
+        w = text.split()
+        removed = 0
+        changed = True
+        while changed:
+            changed = False
+            for n in range(1, 7):
+                i = 0
+                out = []
+                while i < len(w):
+                    chunk = w[i:i + n]
+                    reps = 1
+                    while len(chunk) == n and w[i + reps * n:i + (reps + 1) * n] == chunk:
+                        reps += 1
+                    if reps > max_repeat:
+                        out.extend(chunk * max_repeat); removed += (reps - max_repeat) * n; i += reps * n; changed = True
+                    else:
+                        out.append(w[i]); i += 1
+                w = out
+        return " ".join(w), removed
+
+    def sane_hypothesis(self, text, greedy, max_ratio=1.6):
+        """Guard an attention-decoder hypothesis with the CTC greedy path: collapse loops, and if it is still far longer than
+        the CTC transcript (which cannot loop), fall back to the CTC text. Returns (text, note or None)."""
+        t, removed = self.collapse_loops(text)
+        g = greedy.strip()
+        if removed:
+            note = f"collapsed {removed} looping words"
+        else:
+            note = None
+        if g and len(t.split()) > max_ratio * max(len(g.split()), 1) + 2:
+            return g, (note + "; " if note else "") + "attention hypothesis too long vs CTC: used CTC transcript"
+        return t, note
+
+    @torch.no_grad()
+    def beam_search_segments(self, enc, nbest=5, max_frames=90):
+        """beam_search() per silence-delimited segment when the utterance is long (> max_frames encoder frames = 3.6 s);
+        returns (nbest list with joined texts, segments). Scores are summed over segments."""
+        segs = self.segment_by_blanks(enc) if enc.shape[0] > max_frames else [(0, enc.shape[0])]
+        if len(segs) <= 1:
+            hyps = self.beam_search(enc, nbest)
+            g = self.ctc_greedy(enc)
+            for h in hyps:
+                h["text"], note = self.sane_hypothesis(h["text"], g)
+                if note: h["note"] = note
+            return hyps, segs
+        per = []
+        for a, b in segs:
+            hyps = self.beam_search(enc[a:b], nbest)
+            g = self.ctc_greedy(enc[a:b])
+            for h in hyps:
+                h["text"], note = self.sane_hypothesis(h["text"], g)
+                if note: h["note"] = note
+            per.append(hyps)
+        joined = []
+        for k in range(nbest):
+            texts, score = [], 0.0
+            for hyps in per:
+                h = hyps[min(k, len(hyps) - 1)] if hyps else {"text": "", "score": 0.0}
+                if h["text"]: texts.append(h["text"])
+                score += h["score"]
+            joined.append({"text": " ".join(texts), "score": score, "segments": [hyps[min(k, len(hyps) - 1)]["text"] if hyps else "" for hyps in per]})
+        return joined, segs
+
     def _ids_to_text(self, ids):
         return "".join(self.token_list[i] for i in ids if i not in (0, self.eos)).replace("▁", " ").strip()
 
@@ -254,7 +365,12 @@ class VSREngine:
 
         ctc = torch.tensor(ctc) if ctc is not None else _ctc_ll(self.model.ctc.log_softmax(enc.unsqueeze(0))[0], toks)
         score = (1 - self.ctc_weight) * att + self.ctc_weight * ctc
-        return [{"phrase": p, "att": float(att[b]), "ctc": float(ctc[b]), "score": float(score[b]), "n_tok": len(toks[b])} for b, p in enumerate(phrases)]
+        lm_w = getattr(self, "lm_rescore_weight", 0.0) if getattr(self, "lm", None) is not None else 0.0
+        res = []
+        for b, p in enumerate(phrases):
+            lm_lp = self.lm.sentence_logprob(toks[b]) if lm_w else 0.0
+            res.append({"phrase": p, "att": float(att[b]), "ctc": float(ctc[b]), "score": float(score[b]) + lm_w * lm_lp, "lm": lm_lp, "n_tok": len(toks[b])})
+        return res
 
 
 def _ctc_ll(ctc_lp, toks):

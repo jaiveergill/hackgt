@@ -62,6 +62,7 @@ _KEEP = {
     "state": ("state",),
     "nbest": ("utt_id", "error"),
     "llm": ("utt_id", "accepted", "changed", "latency", "error"),
+    "llm_pick": ("utt_id", "latency", "transcript", "visual_top", "visual_conf", "pick", "confidence", "gap", "verified", "applied", "new_confidence", "note", "error"),
     "confirm": None, "signal": None, "enroll": None, "log": None,
 }
 
