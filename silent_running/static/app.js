@@ -41,8 +41,14 @@ function meta(m){
   $('#camwrap').classList.toggle('listening',!!m.listening);
   setMouthing(mouthingSig||!!m.mouth_active,false);
   showHands(m.hands);
+  showZoom(m.source);
   drawOverlay(m);
 }
+// ESP32-CAM sensor zoom (its sources report zoom): the board re-windows its sensor in place, ~1 s without frames
+function showZoom(src){const z=$('#zoom');z.hidden=!src||src.zoom==null;if(z.hidden||z.classList.contains('busy'))return;
+  $$('#zoom button').forEach(b=>b.classList.toggle('on',+b.dataset.z===src.zoom));}
+$$('#zoom button').forEach(b=>b.onclick=async()=>{const z=$('#zoom');z.classList.add('busy');
+  try{await fetch('/api/zoom?zoom='+b.dataset.z,{method:'POST'});}finally{z.classList.remove('busy');}});  // a refusal arrives as an error event
 function showHands(st){  // "on" | "off: <reason>" (e.g. a missing model), so a disabled hand tracker is visible to the operator
   const b=$('#hands');b.hidden=st==null;if(st==null)return;const on=st==='on';
   b.className='badge handsbadge'+(on?'':' off');b.textContent=`hand signals ${st}`;

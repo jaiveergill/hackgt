@@ -11,11 +11,10 @@ Spec strings (server `--source`):
                     stream:172.20.10.2 = that host's :81/stream with framesize=9 (HVGA) and quality=16 applied on every (re)open
                     via the board's /control endpoint. HVGA q16 ~19 fps without dropouts on a phone hotspot; q10 saturated the
                     link (0.5-1 s gaps, 480 ms ping spikes); VGA runs at 6 fps on this board.
-  stream:172.20.10.2?window=2x   the same, the sensor reading only the centre half of its view: 1.67x the pixels across the
-                    mouth at the same frame rate (see ov2640_window)
+  stream:172.20.10.2?window=2x   the same, the sensor reading only the centre half of its view: 2x the pixels across the
+                    mouth at the same frame rate (the board's sensor is an OV3660: see ov3660_window)
   serial[:/dev/cu.usbserial-XXXX][?baud=1500000&window=2x]   the ESP32-CAM over its USB cable (firmware/usb_cam): no WiFi,
-                    so no freezes when the wearer's head shadows the antenna; framesize and quality (window= is OV2640-only:
-                    see ov2640_window)
+                    so no freezes when the wearer's head shadows the antenna; the same settings and zoom
 """
 import json, math, os, re, sys, threading, time, subprocess, zlib
 import urllib.error, urllib.parse, urllib.request
@@ -45,6 +44,9 @@ class VideoSource:
     def fault(self):
         """Why the source stopped delivering frames, if it knows (shown in the stall report), else None."""
         return None
+
+    def set_zoom(self, zoom):
+        raise ValueError(f"a {self.kind} source has no sensor zoom (the ESP32-CAM's stream: and serial: sources do)")
 
     def reopen(self):
         """Reopen after the source stopped delivering frames (e.g. a camera unplugged and plugged back in)."""
@@ -268,25 +270,49 @@ class FileSource(VideoSource):
                 "realtime": self.realtime, "loop": self.loop, "t_play": round(self._t0, 3)}  # time of frame 0 of this play
 
 
-def ov2640_window(zoom, w, h):
-    """The ESP32-CAM board's /resolution parameters that make its OV2640 read only the centre 1/zoom of the view a w x h
-    frame size shows (esp32-camera sensors/ov2640.c: set_res_raw -> set_window; sx is the sensor mode).
-    SVGA mode (sx=1) reads the 1600x1200 array binned to 800x600 and the window is cut from that. Only for the frame
-    sizes the sensor already reads in SVGA mode at less than its detail, HVGA 480x320 and VGA 640x480, so the frame
-    rate stays. The window is sent pixel for pixel (never scaled): every allowed zoom gives the full 800/w detail
-    (1.67x the pixels across the mouth for HVGA, 1.25x for VGA) and the zoom only sets how much of the view is kept
-    (2x of HVGA: 400x264 frames, half the view). Because the frame size then always changes, it proves the board
-    applied the window. Sizes are multiples of 16x8, the JPEG block (every stock frame size is). More detail would need
-    UXGA mode (sx=0), whose full-array readout the OV2640 datasheet rates at 15 fps instead of 30.
-    OV2640 only: the team's board has an OV3660 (PID 0x3660), whose set_res_raw takes its own array window and timing
-    registers, so these values stall its capture (0.6 fps) and open() fails loudly. A per-sensor window is a follow-up."""
-    if not 400 < w < 800:
-        raise ValueError(f"window= needs framesize HVGA (480x320) or VGA (640x480), the sensor's SVGA mode; the board sends {w}x{h}")
-    fw, fh = (800, 800 * h / w) if w * 3 >= h * 4 else (600 * w / h, 600)  # the frame size's view: widest centred w:h region
-    rw, rh = int(fw / zoom) // 16 * 16, int(fh / zoom) // 8 * 8
-    if rw > w or rh > h or (rw, rh) == (w, h):
-        raise ValueError(f"window={zoom:g}x of {w}x{h} would be scaled, not more detail: use more than {800 / w:.2f}x")
-    return {"sx": 1, "offx": (800 - rw) // 2, "offy": (600 - rh) // 2, "tx": rw, "ty": rh, "ox": rw, "oy": rh}
+SENSORS = {0x26: "OV2640", 0x3660: "OV3660", 0x5640: "OV5640"}  # esp_camera sensor.h PIDs
+# esp32-camera sensors/private_include/ov3660_settings.h ratio_table (the build's copy is identical): the view each aspect
+# ratio reads, as max width/height, array window start/end and total size (HTS, VTS). Every row's ISP offset is 16,6.
+OV3660_VIEWS = [(2048, 1536, 0, 0, 2079, 1547, 2300, 1564), (1920, 1280, 64, 128, 2015, 1419, 2172, 1436),
+                (2048, 1280, 0, 128, 2079, 1419, 2300, 1436), (1920, 1152, 64, 192, 2015, 1355, 2172, 1372),
+                (1920, 1080, 64, 242, 2015, 1333, 2172, 1322), (2048, 880, 0, 328, 2079, 1219, 2300, 1236),
+                (1920, 1536, 64, 0, 2015, 1547, 2172, 1564), (1536, 1536, 256, 0, 1823, 1547, 2044, 1564),
+                (864, 1536, 592, 0, 1487, 1547, 2044, 1564)]
+
+
+def ov3660_window(zoom, w, h):
+    """The board's set_res_raw parameters (its /resolution, or firmware/usb_cam's "win") that make its OV3660 read only the
+    centre 1/zoom of the view a w x h frame size shows (esp32-camera sensors/ov3660.c: set_framesize, set_res_raw).
+    Frame sizes up to half the array per side are read 2x2 binned, with the binned timing (VTS/2), and scaled down: HVGA
+    reads 960x640 binned pixels for its 480x320. A zoom reads the centre 960/zoom x 640/zoom binned pixels with the same
+    timing, so the frame rate stays; up to 2x for HVGA each zoom adds detail, and 2x sends the binned pixels 1:1, unscaled
+    (2x the pixels across the mouth; measured on the board: 30.7 fps, as at 1x). Beyond that frames would only be scaled up.
+    The frame size stays w x h, so frames can't show whether the board applied it: its answer does."""
+    view = next((v for v in OV3660_VIEWS if v[0] * h == v[1] * w), None)
+    if view is None:
+        raise ValueError(f"the OV3660 has no view with the aspect ratio of {w}x{h}")
+    mw, mh, sx, sy, ex, ey, tx, ty = view
+    most = min(mw / 2 / w, mh / 2 / h)
+    if most < 1:
+        raise ValueError(f"window= needs a frame size the OV3660 reads binned (up to {mw // 2}x{mh // 2}); the board sends {w}x{h}")
+    if zoom > most + 1e-6:
+        raise ValueError(f"window={zoom:g}x of {w}x{h} would be scaled up, not more detail: the OV3660 gives up to {most:g}x")
+    bw, bh = round(mw / 2 / zoom) // 2 * 2, round(mh / 2 / zoom) // 2 * 2  # binned pixels read, even: the Bayer order stays
+    cx, cy = (sx + ex + 1) // 2, (sy + ey + 1) // 2  # centre of the view on the array
+    hw, hh = bw + 16, bh + 4  # half the array window: the binned pixels plus the ISP offset (8, 2 binned) on each side
+    return {"sx": cx - hw, "sy": cy - hh, "ex": cx + hw - 1, "ey": cy + hh - 1, "offx": 8, "offy": 2, "tx": tx, "ty": ty // 2 + 1,
+            "ox": w, "oy": h, "scale": int((bw, bh) != (w, h)), "binning": 1}
+
+
+def _zoom(window):
+    """window=2x -> 2.0: a zoom above 1x (how far this board can go, ov3660_window says)."""
+    try:
+        zoom = float(str(window).lower().rstrip("x"))
+    except ValueError:
+        zoom = 0.0
+    if not 1 < zoom <= 8:
+        raise ValueError(f"window must be a zoom above 1x and up to 8x (e.g. window=2x), got {window!r}")
+    return zoom
 
 
 class Esp32Source(VideoSource):
@@ -294,33 +320,29 @@ class Esp32Source(VideoSource):
     reader thread that keeps only the newest, so a slow consumer never accumulates lag; they are stamped at arrival.
     The head camera looks at the patient, so the preview is not mirrored.
     Every open pushes the settings (framesize, quality: a board reboot resets them), then window=2x zooms the sensor into
-    the centre of its view (ov2640_window) after the settings (a framesize change resets it) and with no stream open (the
-    WiFi sketch's stream handler can end on a sensor reconfigure). open returns only once frames arrive at the expected
-    size, after the frames the board buffered before the change, so a board that ignores a setting fails loudly.
-    Transports implement _set, _set_window, _connect (start receiving; returns at the first frame), _disconnect, release."""
+    the centre of its view (ov3660_window: the board says which sensor it has) after the settings (a framesize change
+    resets it) and with no stream open (the WiFi sketch's stream handler can end on a sensor reconfigure). set_zoom changes
+    the zoom live the same way. Frames count only after the ones the board buffered before a change, and must arrive at
+    the expected size. Transports implement _set, _set_window, _sensor (the esp_camera PID), _connect (start receiving;
+    returns at the first frame), _disconnect, release."""
     mirror = False
     BUFFERED = 2    # frames the board may hold from before a settings change (PSRAM: fb_count=2)
     DEFAULT_SETTINGS = {"framesize": 9, "quality": 16}
 
     def __init__(self, name, settings, timeout=5.0):
-        self.name, self.settings, self.timeout, self.zoom = name, settings, timeout, None
+        self.name, self.settings, self.timeout = name, settings, timeout
         window = self.settings.pop("window", None)
-        if window is not None:
-            try:
-                self.zoom = float(window.lower().rstrip("x"))
-            except ValueError:
-                self.zoom = 0.0
-            if not 1 < self.zoom <= 8:
-                raise ValueError(f"window must be a zoom above 1x and up to 8x (e.g. window=2x), got {window!r}")
+        self.zoom = _zoom(window) if window is not None else None
         self._frame, self._ts, self._seq, self._seq0, self._got = None, 0.0, 0, 0, 0
         self._err, self._thread = None, None
         self.board_msg, self._t_board_msg = None, 0.0  # the board's last unsolicited message (e.g. "err frame capture failed")
         self.width = self.height = 0
         self.fps_est = self.mbps_est = 0.0
-        self.frame_bytes = self.bad_frames = 0
+        self.frame_bytes = self.bad_frames = self._bad_at_frame = 0  # _bad_at_frame: bad_frames at the last good frame
         self._t_est, self._n_est, self._bytes_est = time.time(), 0, 0
-        self.full = None     # frame size of the whole view, measured on the first open: the window's geometry
-        self.window = None   # its /resolution parameters
+        self.full = None     # frame size of the whole view, measured on every open: the window's geometry
+        self.window = None   # the window's set_res_raw parameters (None: the whole view)
+        self.sensor = None   # esp_camera PID, asked on the first zoom
 
     def open(self):
         try:
@@ -328,30 +350,57 @@ class Esp32Source(VideoSource):
         except Exception:  # whatever step failed, leave no port, socket or reader behind
             self.release()
             raise
-        print(f"[source] {self.kind} {self.name} {self.width}x{self.height}" + (f", window {self.zoom:g}x of {self.full[0]}x{self.full[1]}: {self.window}" if self.window else ""))
+        print(f"[source] {self.kind} {self.name} {self.width}x{self.height}" + (f", window {self.zoom:g}x of {SENSORS[self.sensor]}: {self.window}" if self.window else ""))
 
     def _configure(self):
         for k, v in self.settings.items():
             self._set(k, v)
-        if self.zoom and self.window is None:  # first open: the whole view's frame size sets the window's geometry
-            self._connect()
+        self._connect()
+        self.full = self._size_after(self.BUFFERED + 1 if self.settings else 1)  # after the frames buffered before the settings
+        self._got = self._seq - 1
+        if self.zoom:
             try:
-                full = self._size_after(self.BUFFERED + 1)
-            finally:
-                self._disconnect()
-            try:
-                self.window = ov2640_window(self.zoom, *full)
+                self._zoom_to(self.zoom)
             except ValueError as e:
                 raise RuntimeError(str(e))
-            self.full = full
-        if self.window:
-            self._set_window(self.window)
+
+    def _window_for(self, zoom):
+        """zoom's window parameters (None at 1x); ValueError, before the board is touched, if this board can't zoom that far."""
+        if "framesize" not in self.settings:
+            raise ValueError(f"{self.name}: a sensor zoom needs the ESP32-CAM's framesize setting (pushing it is what resets the window)")
+        if zoom is None:
+            return None
+        if self.sensor is None:
+            self.sensor = self._sensor()
+        if self.sensor != 0x3660:
+            raise ValueError(f"{self.name}: the sensor zoom is worked out for the OV3660; this board has a {SENSORS.get(self.sensor, hex(self.sensor))}")
+        return ov3660_window(zoom, *self.full)
+
+    def _zoom_to(self, zoom):
+        """Window the sensor for zoom (None: the whole view again) and start read() at the first frame that shows it."""
+        window = self._window_for(zoom)
+        self._disconnect()
+        if window:
+            self._set_window(window)
+        else:
+            self._set("framesize", self.settings["framesize"])  # set_framesize writes the whole view's window
         self._connect()
-        if self.window:
-            self._await_size(self.window["ox"], self.window["oy"])
-        elif self.settings:  # read() starts after the frames the board buffered before the change
-            self._size_after(self.BUFFERED + 1)
-            self._got = self._seq - 1
+        size = self._size_after(self.BUFFERED + 1)
+        if size != self.full:
+            raise RuntimeError(f"{self.name}: frames are {size[0]}x{size[1]} after the {zoom or 1:g}x window, expected {self.full[0]}x{self.full[1]}")
+        self._got = self._seq - 1
+        self.zoom, self.window = zoom, window
+
+    def set_zoom(self, zoom):
+        """Change the sensor zoom live: 1 = the whole view, 2 = its centre half (ov3660_window). A zoom this board can't
+        do is refused (ValueError) before the board is touched. If the board fails midway (it may have applied it, or be
+        left with no stream), the source reopens at once at its previous zoom, then the RuntimeError is raised."""
+        zoom = None if float(zoom) == 1 else _zoom(zoom)
+        try:
+            self._zoom_to(zoom)
+        except RuntimeError:
+            self.reopen()  # settings and the recorded zoom pushed again: board, stream and info() agree
+            raise
 
     def _publish(self, jpg):
         """A received JPEG becomes the newest frame; a corrupt one (bytes lost on the way) is counted and dropped."""
@@ -360,7 +409,7 @@ class Esp32Source(VideoSource):
         if img is None:
             self.bad_frames += 1
             return
-        self._frame, self._ts, self._seq = img, time.time(), self._seq + 1
+        self._frame, self._ts, self._seq, self._bad_at_frame = img, time.time(), self._seq + 1, self.bad_frames
         self.height, self.width, self.frame_bytes = img.shape[0], img.shape[1], len(jpg)
         self._n_est += 1; self._bytes_est += len(jpg)
         dt = self._ts - self._t_est
@@ -378,25 +427,17 @@ class Esp32Source(VideoSource):
         h, w = self._frame.shape[:2]
         return w, h
 
-    def _await_size(self, w, h):
-        """Wait for the board to send w x h frames; read() then starts at the newest of them."""
-        t0 = time.time()
-        while self._frame.shape[1::-1] != (w, h):
-            if self._err or time.time() - t0 > self.timeout:
-                raise RuntimeError(self._err or f"the board did not apply the sensor window: frames are still {self.width}x{self.height}, expected {w}x{h}")
-            time.sleep(0.02)
-        self._got = self._seq - 1
-
     def fault(self):
         recent = self.board_msg if time.time() - self._t_board_msg < 10 else None
-        return self._err or recent
+        damaged = self.bad_frames - self._bad_at_frame
+        return self._err or recent or (f"the last {damaged} frames all arrived damaged: bytes lost on the way" if damaged >= 3 else None)
 
     def _reset_estimates(self):
         self._t_est, self._n_est, self._bytes_est = time.time(), 0, 0
 
     def read(self):
         t0 = time.time()
-        while self._seq == self._got and time.time() - t0 < 1.0:  # wait for a new frame (like a blocking camera read)
+        while self._seq == self._got and time.time() - t0 < min(self.stall_s, 1.0):  # wait for a new frame (like a blocking camera read)
             if self._err and self._thread and not self._thread.is_alive():
                 return False, None, None
             time.sleep(0.003)
@@ -408,7 +449,7 @@ class Esp32Source(VideoSource):
     def info(self):
         return {**super().info(), "fps": round(self.fps_est, 1), "mbps": round(self.mbps_est, 2), "frame_kb": round(self.frame_bytes / 1024, 1),
                 "bad_frames": self.bad_frames, "board_msg": self.board_msg, "width": self.width, "height": self.height, "settings": self.settings,
-                **({"zoom": self.zoom, "full": self.full, "window": self.window} if self.zoom else {})}
+                **({"zoom": self.zoom or 1, "sensor": SENSORS.get(self.sensor), "window": self.window} if "framesize" in self.settings else {})}
 
 
 class StreamSource(Esp32Source):
@@ -439,7 +480,7 @@ class StreamSource(Esp32Source):
     def _get(self, path, params):
         q = urllib.parse.urlencode(params)
         try:
-            urllib.request.urlopen(f"{self.board}{path}?{q}", timeout=2).read()
+            return urllib.request.urlopen(f"{self.board}{path}?{q}", timeout=2).read()
         except urllib.error.HTTPError as e:
             hint = " (this firmware has no sensor window: flash the current CameraWebServer example)" if path == "/resolution" and e.code == 404 else ""
             raise RuntimeError(f"{self.board}{path}?{q} -> HTTP {e.code}{hint}")
@@ -451,6 +492,12 @@ class StreamSource(Esp32Source):
 
     def _set_window(self, w):
         self._get("/resolution", w)
+
+    def _sensor(self):
+        """The CameraWebServer sketch reads any sensor register with /greg: an OV3660/OV5640 has its PID at 0x300A-0x300B
+        (an OV2640 reads other registers there, never 0x3660)."""
+        hi, lo = (int(self._get("/greg", {"reg": r, "mask": 0xFF})) for r in (0x300A, 0x300B))
+        return hi << 8 | lo
 
     def _connect(self):
         self._stop, self._err, self._seq0 = False, None, self._seq
@@ -557,6 +604,11 @@ class SerialSource(Esp32Source):
     of 5 KB HVGA frames (measured on the board (ESP32-CAM-MB, macOS): 2 Mbaud lost a byte in 60% of frames, 1.5 Mbaud 2%, 1 Mbaud 1%)."""
     kind = "serial"
     BUFFERED = 0
+    # Bytes stream continuously (~150 KB/s, a frame every ~33 ms), so half a second without a frame is a burst of damaged
+    # frames (reopen keeps the port) or a wedged link: macOS's CH340 driver (AppleUSBCHCOM) sometimes stops delivering
+    # under load while the board keeps sending (its status stayed healthy; flushing, re-setting the baud rate or resetting
+    # the board on the open port did not revive it, only reopening the port did). The fix at the source is WCH's driver.
+    stall_s = 0.5
 
     def __init__(self, spec, timeout=5.0):
         port, _, query = spec.partition("?")
@@ -565,7 +617,7 @@ class SerialSource(Esp32Source):
         self.baud = int(settings.pop("baud", 1500000))
         self.port = port or None
         super().__init__(port or "serial", settings, timeout)
-        self._ser, self._texts, self._streaming, self._awaiting = None, None, False, False
+        self._ser, self._texts, self._streaming, self._awaiting, self._t_bytes = None, None, False, False, 0.0  # _t_bytes: when bytes last arrived
 
     def open(self):
         super().open()
@@ -593,7 +645,7 @@ class SerialSource(Esp32Source):
             ser.open()
         except serial.SerialException as e:
             raise RuntimeError(f"cannot open {self.name}: {e}")
-        self._ser, self._texts, self._err, self._seq0 = ser, queue.Queue(), None, self._seq
+        self._ser, self._texts, self._err, self._seq0, self._t_bytes = ser, queue.Queue(), None, self._seq, time.time()
         self._reset_estimates()
         self._thread = threading.Thread(target=self._reader, args=(ser,), daemon=True)
         self._thread.start()
@@ -607,7 +659,7 @@ class SerialSource(Esp32Source):
             time.sleep(0.02)
 
     def _command(self, line):
-        """Send one command; the board answers "ok <line>" or "err <line>"."""
+        """Send one command; the board answers "ok <line>[ <result>]" or "err <line>". Returns the result."""
         import serial
         self._open_port()
         self._awaiting = True
@@ -616,7 +668,7 @@ class SerialSource(Esp32Source):
                 self._ser.write((line + "\n").encode())
             except serial.SerialException as e:
                 raise RuntimeError(f"{self.name}: sending '{line}' failed: {e}")
-            self._await_answer(line)
+            return self._await_answer(line)
         finally:
             self._awaiting = False
 
@@ -630,8 +682,8 @@ class SerialSource(Esp32Source):
                 text = self._texts.get(timeout=0.1)
             except queue.Empty:
                 continue
-            if text == f"ok {line}":
-                return
+            if text == f"ok {line}" or text.startswith(f"ok {line} "):
+                return text[len(f"ok {line} "):]
             if text == f"err {line}":
                 raise RuntimeError(f"{self.name}: the board refused '{line}'")
             print(f"[source] {self.name}: {text}")  # "ready" after the reset opening the port causes, or a capture error
@@ -641,7 +693,10 @@ class SerialSource(Esp32Source):
         self._command(f"set {var} {val}")
 
     def _set_window(self, w):
-        self._command("win " + " ".join(str(w[k]) for k in ("sx", "offx", "offy", "tx", "ty", "ox", "oy")))
+        self._command("win " + " ".join(str(w[k]) for k in ("sx", "sy", "ex", "ey", "offx", "offy", "tx", "ty", "ox", "oy", "scale", "binning")))
+
+    def _sensor(self):
+        return int(self._command("sensor"), 16)
 
     def _connect(self):
         self._open_port()
@@ -659,7 +714,10 @@ class SerialSource(Esp32Source):
         buf = bytearray()
         try:
             while self._ser is ser:
-                buf += ser.read(max(1, ser.in_waiting))
+                chunk = ser.read(max(1, ser.in_waiting))
+                if chunk:
+                    self._t_bytes = time.time()
+                buf += chunk
                 while True:
                     i = buf.find(b"SRF")
                     if i < 0:
@@ -690,6 +748,19 @@ class SerialSource(Esp32Source):
             if self._ser is ser:
                 self._err = f"{self.name} read failed: {e}"
 
+    def fault(self):
+        silent = time.time() - self._t_bytes
+        return super().fault() or (f"no bytes from the board for {silent:.1f}s (the board, or the USB-serial driver, stopped)" if silent > 1 else None)
+
+    def reopen(self):
+        """After a stall. While bytes are still arriving (a burst of damaged frames, or a board reset whose "ready" was
+        lost) the settings and zoom are pushed again on the open port: reopening it would reset the board (~1.5 s, see
+        _open_port) and fix neither. With nothing arriving, or a dead reader, the port is reopened."""
+        if self._ser is None or self._err or not self._thread.is_alive() or time.time() - self._t_bytes > 0.5:
+            return super().reopen()  # nothing arriving: the board or the USB-serial driver stopped; a port reopen resets both
+        self._streaming = False
+        self.open()
+
     def release(self):
         self._streaming = False
         ser, self._ser = self._ser, None
@@ -700,6 +771,16 @@ class SerialSource(Esp32Source):
 
     def info(self):
         return {**super().info(), "port": self.name, "baud": self.baud}
+
+
+def with_zoom(spec, zoom):
+    """The source spec with window= set to zoom (none at 1x): what a restarted capture process should open."""
+    base, _, query = spec.partition("?")
+    kv = [p for p in query.split("&") if p and not p.startswith("window=")]
+    zoom = float(str(zoom).lower().rstrip("x"))
+    if zoom != 1:
+        kv.append(f"window={zoom:g}x")
+    return base + ("?" + "&".join(kv) if kv else "")
 
 
 def _flag(v):

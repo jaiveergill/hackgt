@@ -41,11 +41,13 @@ Measured on the board (ESP32-CAM-MB on macOS, `scripts/bench_link.py serial`): 2
 gap 0.05-0.11 s over 4 x 15 s runs; WiFi logs showed 1-3.4 s freezes), 5-7 KB per HVGA frame depending on the scene. The
 cable carries ~150 KB/s at 1.5 Mbaud, so bigger frames lower the frame rate instead of freezing it. 2 Mbaud lost a byte in
 60% of frames, 1.5 Mbaud 2%, 1 Mbaud 1%: a damaged frame is dropped by its CRC-32, never read smeared.
-Not working on the board yet: the sensor zoom (`window=`). Root cause (found by the kuala-lumpur session): this board's
-camera is an OV3660 (PID 0x3660 at 0x3C), not an OV2640, and `window=` computes OV2640 `set_res_raw` arguments. On the
-OV3660 those arguments are its array window and timing registers, so the call gives an empty window and capture stalls
-(0.6 fps, "frame capture failed"). The OV3660 values for a centred 2x (2x the pixels across the mouth) streamed at 30.7 fps
-in a debug build; the per-sensor window and a live zoom toggle are a follow-up. The WiFi `window=` path has the same bug.
+This board's camera is an OV3660 (PID 0x3660 at 0x3C), not an OV2640: its `set_res_raw` takes the array window and timing
+registers, so the zoom is computed for it (`sources.ov3660_window`; the board answers `sensor` with its PID, or `/greg` over
+WiFi). 2x reads the centre half of the view binned 1:1 instead of scaled by half: 2x the pixels across the mouth at the same
+timing, measured 29-32 fps on the board, switched live in 0.2-0.3 s by the **1x / 2x** toggle on the camera view
+(`POST /api/zoom?zoom=2`). Byte loss on the cable is host-load dependent: 0% with the camera alone, 2-6% of frames with the
+full app running (the bytes never reach macOS's serial buffer: the CH340 or Apple's driver drops them); each such frame is
+dropped by its CRC-32.
 ## Session logs (read these when something lagged)
 
 Every server start writes `logs/session_<timestamp>.jsonl` (`logs/latest.jsonl` points at the newest). It records, every 5 s,
@@ -113,13 +115,11 @@ python scripts/captures.py rescore    # re-read every labelled clip with this ch
 * Watch **mouth N/45 px** on the camera badge: the mouth's width in camera pixels vs the 45 px the model's crop reads.
   Amber (under 45) means the crop is upsampled, i.e. blurred: move closer or zoom in. Half the pixels cut Phrase Mode
   top-1 from 64% to 38% on MIRACL clips. Each result, the session log and the capture log record it too.
-* ESP32-CAM zoom (not working on the board yet: see "ESP32-CAM glasses" above): `--source stream:172.20.10.2?window=2x`
-  would make the sensor read only the centre half of its view, sent
-  pixel for pixel: 1.67x the pixels across the mouth over the same WiFi link (same sensor mode and clock as HVGA, so the
-  frame rate should hold: not yet measured on the board). That is the most detail the sensor gives at this frame rate;
-  the zoom only sets how much of the view is kept, from just over 1.67x (widest, 464x312) to 2x (400x264). The server
-  refuses zooms it could only scale, checks the board applied the window, and errors if the firmware can't
-  (`scripts/check_stream_window.py` checks our side against a fake board).
+* ESP32-CAM zoom: the **1x / 2x** toggle on the camera view, or `window=2x` in the source spec (`serial?window=2x`,
+  `stream:172.20.10.2?window=2x`). 2x makes the OV3660 read only the centre half of its view, 2x the pixels across the
+  mouth at the same frame rate; that is the most detail it gives at this frame rate (beyond 2x frames would only be
+  scaled up, so the server refuses). `scripts/check_stream_window.py` and `scripts/check_serial_source.py` check our side
+  against a fake OV3660 board.
 * Mouth at normal or slightly slower pace with clear articulation; hold Listen a beat before and after.
 * Utterances of 1-3 s work best; the model saw 25 fps TED talks, so keep the head reasonably still.
 
