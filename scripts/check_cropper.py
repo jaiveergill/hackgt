@@ -1,17 +1,20 @@
 """Check that the capture process's IncrementalCropper gives exactly the crops emit() used to compute in one batch when an
 utterance ended (resample_25fps + VideoProcess over the frames in [start, end]), and time both. No VSR model or lock.
+Also that a copy of it finished early, as the capture process sends a hands-free utterance ahead of its hang, gives them too.
 
   python scripts/check_cropper.py --miracl ~/.cache/silent_running/miracl/full [--clips data/samples/*.mp4]
 
 Every clip is fed frame by frame at its native frame rate (MIRACL is 15 fps, a webcam 30: the 25 fps resampling is part of
 what is compared), with a few ms of timestamp jitter like a live camera, and the camera's own landmarker. Each clip is
-one utterance, cropped five ways:
+one utterance, cropped six ways:
   manual      starts after the first 2 frames and ends at the last frame (safe = the newest frame, as while holding Listen)
   auto        ends POST_ROLL after a mouth that went still HANG before the last frame: the cropper has already seen and
               assigned frames past the end, as when the hands-free hang runs out
   gaps        manual with the landmarks of frames 0-1, 6-10 and the last 3 removed: leading fill, interpolation, trailing fill
   no face     manual with no landmarks at all: the same "face not tracked" error
   too short   manual over the last 7 frames: the same "too short" error
+  ahead       auto, and a copy() finished at the first frame at or after the end (the utterance sent ahead of the hang):
+              the copy's crops and the original's at the end must both be the batch crops
 Expected: identical crops (np.array_equal) or the same error message, the same n_face / n_total / duration.
 """
 import argparse, glob, os, sys, time
@@ -40,17 +43,24 @@ def batch_emit(vp, items, start, end):
         return None, n_face, len(lms), dur, f"crop failed: {e}"
 
 
-def incremental(vp, items, start, end, safe_fn):
+def incremental(vp, items, start, end, safe_fn, ahead=False):
+    """-> (finish(end), its seconds, seconds per frame, and with ahead: a copy's finish(end) at the first frame past end)."""
     c = IncrementalCropper(vp, start, max_backlog=700)
-    t_feed = []
+    t_feed, early = [], None
     for ts, rgb, lm in items:
         t = time.perf_counter()
         c.feed(ts, rgb, lm)
+        if ahead and early is None and ts >= end:  # camera_proc._worker: after feed, before advance
+            early = c.copy().finish(end)
         c.advance(safe_fn(ts))
         t_feed.append(time.perf_counter() - t)
     t = time.perf_counter()
     r = c.finish(end)
-    return r, time.perf_counter() - t, t_feed
+    return r, time.perf_counter() - t, t_feed, early
+
+
+def same_crop(ref, got):
+    return ref[1:] == got[1:] and (ref[0] is None) == (got[0] is None) and (ref[0] is None or np.array_equal(ref[0], got[0]))
 
 
 def clip_items(path, fl, rng):
@@ -86,10 +96,11 @@ def main():
                  "gaps": (gaps, first, last + 0.001, lambda ts: ts),
                  "no face": ([(t, f, None) for t, f, _ in items], first, last + 0.001, lambda ts: ts),
                  "too short": (items, items[max(len(items) - 7, 0)][0], last + 0.001, lambda ts: ts)}
+        cases["ahead"] = cases["auto"]
         for name, (its, start, end, safe_fn) in cases.items():
             t = time.perf_counter(); ref = batch_emit(vp, its, start, end); tb = time.perf_counter() - t
-            got, tf, tfeed = incremental(vp, its, start, end, safe_fn)
-            same = ref[1:] == got[1:] and (ref[0] is None) == (got[0] is None) and (ref[0] is None or np.array_equal(ref[0], got[0]))
+            got, tf, tfeed, early = incremental(vp, its, start, end, safe_fn, ahead=name == "ahead")
+            same = same_crop(ref, got) and (name != "ahead" or (early is not None and same_crop(ref, early)))
             k = tally.setdefault(name, [0, 0, 0])
             k[0] += 1; k[1] += same; k[2] += ref[0] is not None
             if not same:

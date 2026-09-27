@@ -70,6 +70,7 @@ let enrolling=false;  // the hero shows the enrollment prompt; cleared when the 
 function setState(s,extra){
   if(enrolling&&s!=='enrolling'){enrolling=false;heroIdle('Hold Listen and mouth a phrase','Waiting for the patient');}
   const el=$('#state');el.className='state '+s;el.textContent=(s==='nurse_listening'?'nurse speaking':s)+(extra?' · '+extra:'');
+  if(s!=='nurse_listening'&&$('#nurse').classList.contains('on')){$('#nurse').classList.remove('on');$('#nurselbl').textContent=NURSE_LBL;}
   const p=$('#statuspill');p.className='statuspill '+s;p.querySelector('span').textContent=s==='nurse_listening'?'nurse speaking':s;
   const h=$('#hero');
   if(s==='listening'&&h.dataset.state!=='confirm'){$('#eyebrow').textContent='Listening · mouth the phrase';}
@@ -95,7 +96,7 @@ function handle(m){
   else if(m.type==='alert'){showAlert(m);}
   else if(m.type==='nbest'){if(m.error)$('#nbest').textContent='beam n-best failed: '+m.error;else renderNbest(m.nbest);}
   else if(m.type==='llm'){renderLLM(m);}
-  else if(m.type==='delivery'){const d=$('#delivrep');if(d){d.innerHTML=`delivered <b>${esc(m.emotion)}</b>${m.intensity?` ${(m.intensity*100).toFixed(0)}%`:''} · ${esc(m.model)}${m.tag?` · tag <code>${esc(m.tag)}</code>`:''} · stability ${esc(m.stability)} · speed ${m.rate.toFixed(2)}x · synth ${m.cached?'cached':esc(m.t_synth)+' s'}${m.retime&&m.retime.applied?` · retimed (global ${esc(m.retime.global)}x)`:(m.retime&&m.retime.reason?` · no retime: ${esc(m.retime.reason)}`:'')} · total ${esc(m.total)} s`;}renderAudioStrip(m.retime);}
+  else if(m.type==='delivery'){const d=$('#delivrep');if(d){d.innerHTML=`delivered <b>${esc(m.emotion)}</b>${m.intensity?` ${(m.intensity*100).toFixed(0)}%`:''} · ${esc(m.model)}${m.tag?` · tag <code>${esc(m.tag)}</code>`:''} · stability ${esc(m.stability)} · speed ${m.rate.toFixed(2)}x · synth ${m.cached?'cached':m.streamed?`streamed, first audio ${esc(m.t_synth)} s`:esc(m.t_synth)+' s'}${m.retime&&m.retime.applied?` · retimed (global ${esc(m.retime.global)}x)`:(m.retime&&m.retime.reason?` · no retime: ${esc(m.retime.reason)}`:'')} · total ${esc(m.total)} s`;}renderAudioStrip(m.retime);}
   else if(m.type==='log'){addLog(m.entry);}
   else if(m.type==='error'){toast(m.message);}  // a failed decode comes with its own idle status
   else if(m.type==='context'){applyCtx(m.context);}
@@ -278,7 +279,7 @@ function applyNonverbal(nv){
 
 // ---------- latency: server stages + decision + time to first audio
 const lat={uid:null,t:{},server:null};  // one utterance: only its own decision and first audio are counted
-const LAT_COLORS={crop:'#56677b',encode:'#5aa9ff',phrase:'#3ddc97',beam:'#3ddc97',decide:'#b18cff',voice:'#ffb547'};
+const LAT_COLORS={crop:'#56677b',encode:'#5aa9ff',phrase:'#3ddc97',beam:'#3ddc97',read:'#5aa9ff',decide:'#b18cff',voice:'#ffb547'};  // read: what was left of a reading that ran during the hang
 function latResult(m){lat.uid=m.utt_id;lat.t={result:performance.now()};lat.server=m.latency;renderLatency();}
 function latMark(uid,k){if(uid===lat.uid&&!lat.t[k]){lat.t[k]=performance.now();renderLatency();}}
 function renderLatency(){
@@ -406,7 +407,7 @@ window.addEventListener('keyup',e=>{if(e.code==='Space'&&!typing())up(e);});
 
 // ---------- nurse
 const NURSE_LBL='Nurse';
-$('#nurse').onclick=()=>{const b=$('#nurse');b.classList.add('on');$('#nurselbl').textContent='Listening… 5 s';send({cmd:'nurse',seconds:5});setTimeout(()=>{b.classList.remove('on');$('#nurselbl').textContent=NURSE_LBL;},6500);};
+$('#nurse').onclick=()=>{$('#nurse').classList.add('on');$('#nurselbl').textContent='Listening…';send({cmd:'nurse',seconds:5});};  // until the nurse pauses (5 s at most): setState resets it
 $('#nursesend').onclick=()=>{const t=$('#nursetext').value.trim();if(t){send({cmd:'nurse_text',text:t});$('#nursetext').value='';}};
 $('#nursetext').addEventListener('keydown',e=>{if(e.key==='Enter')$('#nursesend').click();});
 // ---------- corrections for data/captures: "what was actually said" for the latest utterance (scripts/captures.py)

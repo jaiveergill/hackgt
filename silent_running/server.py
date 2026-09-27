@@ -75,10 +75,77 @@ def set_status(s, **kw):
 
 
 # ----------------------------------------------------------------------------- decoding pipeline
-def run_decode(rois, duration, source="webcam", label=None, t_crop=0.0, expression=None, nonverbal=None, mouth_px=None):
-    """Full pipeline on an utterance's mouth crops. Emits incremental events so the UI can show progress."""
+def _read(rois, mode, on_greedy=None):
+    """The model's reading of an utterance's mouth crops (work_lock held). No events and no state: it can run before the
+    utterance is confirmed (run_decode's `ahead`). on_greedy(read) runs once the free transcript is known, before the
+    phrase scoring or beam search. -> {"t": [start, input, encode, greedy, phrase], "error" | "enc", "greedy", ...}"""
+    r = {"mode": mode, "t": [time.time()]}
+    try:
+        x = engine.to_model_input(rois)
+    except Exception as e:
+        r["error"] = f"Mouth crop failed: {e}"
+        return r
+    r["n_frames"] = int(x.shape[1])
+    r["t"].append(time.time())
+    r["enc"] = engine.encode(x)
+    r["t"].append(time.time())
+    r["greedy"] = engine.ctc_greedy(r["enc"])
+    r["t"].append(time.time())
+    if on_greedy:
+        on_greedy(r)
+    if not r["greedy"].strip():  # no speech: nothing more to read
+        return r
+    if mode == "phrase":  # scores the free transcript too: how much better it fits the video than any phrase
+        r["pd"] = phrase_decoder.decode(r["enc"], free=r["greedy"])
+        text = r["pd"]["selected"]
+    else:
+        r["nbest"] = engine.beam_search(r["enc"], 5)
+        text = r["nbest"][0]["text"]
+    r["t"].append(time.time())
+    r["timing"] = _safe_timing(r["enc"], text)
+    return r
+
+
+def _stages(r, t_crop):
+    """Seconds per stage of a read; crop includes the capture process's (t_crop)."""
+    t = r["t"]
+    st = {"crop": t_crop + t[1] - t[0], "encode": t[2] - t[1], "greedy": t[3] - t[2]}
+    if len(t) > 4:
+        st["phrase" if r["mode"] == "phrase" else "beam"] = t[4] - t[3]
+    return st
+
+
+class _Ahead:
+    """A hands-free utterance the capture process sent before the hang confirmed its end (camera_proc `ahead`)."""
+    TIMEOUT = 30.0  # s; the confirmation comes ~0.2 s later, or once frames flow again after a stall; a dead capture process never sends it
+
+    def __init__(self):
+        self.ev, self.confirmed, self.t = threading.Event(), False, None
+
+    def settle(self, confirmed):
+        self.confirmed, self.t = confirmed, time.time()
+        self.ev.set()
+
+    def wait(self):
+        """True once the end is confirmed; False if the mouth moved again (or nothing came)."""
+        return self.ev.wait(self.TIMEOUT) and self.confirmed
+
+
+AHEAD = {}  # id -> _Ahead, from the utterance sent ahead until its confirmation (both arrive on the camera reader thread, in order)
+
+
+def run_decode(rois, duration, source="webcam", label=None, t_crop=0.0, expression=None, nonverbal=None, mouth_px=None, ahead=None):
+    """Full pipeline on an utterance's mouth crops. Emits incremental events so the UI can show progress.
+    ahead: an _Ahead. The model reads the utterance at once without showing anything, and it is published only once its end
+    is confirmed, with latencies from the confirmation (the reading's own stages go under "ahead"); dropped if not."""
+    read = None
+    if ahead is not None:
+        with work_lock:
+            read = _read(rois, STATE["mode"])
+        if not ahead.wait():
+            return None
     t_queued = time.time()
-    t0 = t_queued - t_crop  # end of the utterance: every latency below includes the wait for work_lock
+    t0 = ahead.t if ahead else t_queued - t_crop  # end of the utterance: every latency below includes the wait for work_lock
     with work_lock:
         wait = time.time() - t_queued
         sess = ENROLL["session"]
@@ -91,24 +158,32 @@ def run_decode(rois, duration, source="webcam", label=None, t_crop=0.0, expressi
         # live camera only by default: file playback and decode_file are replays of known clips (SR_CAPTURE=all: file playback too)
         if capture and (source.split("-")[0] in ("webcam", "usb", "stream", "serial") or (os.environ.get("SR_CAPTURE") == "all" and source.startswith("file"))):
             capture.utterance(uid, rois, {"kind": source, **((camera.source_info or {}) if camera else {})})
-        set_status("processing", utt_id=uid, stage="encode")
-        try:
-            x = engine.to_model_input(rois)
-        except Exception as e:
+        def show_raw(r):  # the free transcript; while the phrase scoring or beam search runs unless the reading ran ahead
+            st = _stages(r, t_crop)
+            broadcast({"type": "raw", "utt_id": uid, "stage": "greedy", "text": r["greedy"], "n_frames": r["n_frames"], "duration": duration,
+                       "latency": {"lock": wait, "crop": st["crop"], "encode": st["encode"], "greedy": st["greedy"]}})
+            if r["mode"] == "open" and r["greedy"].strip() and ahead is None:
+                set_status("processing", utt_id=uid, stage="beam")
+        if read is None:
+            set_status("processing", utt_id=uid, stage="encode")
+            read = _read(rois, STATE["mode"], show_raw)
+        elif "error" not in read:
+            show_raw(read)
+        if "error" in read:
             set_status("idle")
-            broadcast({"type": "error", "utt_id": uid, "message": f"Mouth crop failed: {e}"})
+            broadcast({"type": "error", "utt_id": uid, "message": read["error"]})
             return None
-        t1 = time.time()
-        set_status("processing", utt_id=uid, stage="encode")
-        enc = engine.encode(x)
-        t2 = time.time()
-        greedy = engine.ctc_greedy(enc)
-        t3 = time.time()
-        broadcast({"type": "raw", "utt_id": uid, "stage": "greedy", "text": greedy, "n_frames": int(x.shape[1]), "duration": duration,
-                   "latency": {"lock": wait, "crop": t1 - t0 - wait, "encode": t2 - t1, "greedy": t3 - t2}})
-        result = {"utt_id": uid, "mode": STATE["mode"], "profile": STATE["profile"], "raw_greedy": greedy, "n_frames": int(x.shape[1]), "duration": duration, "source": source, "label": label,
+        enc, greedy, st = read["enc"], read["greedy"], _stages(read, t_crop)
+        t_done = max(read["t"][-1], t_queued + wait)
+        if ahead is None:
+            latency = {"lock": wait, **{k: v for k, v in st.items() if k != "greedy"}, "total": t_done - t0}
+        else:  # the reading ran during the hang: what is left is the part of it after the confirmation, and the lock
+            latency = {"lock": wait, "read": max(read["t"][-1] - t0, 0.0), "total": t_done - t0}
+        result = {"utt_id": uid, "mode": read["mode"], "profile": STATE["profile"], "raw_greedy": greedy, "n_frames": read["n_frames"], "duration": duration, "source": source, "label": label,
                   "mouth_px": mouth_px,  # median mouth width (camera px) while mouthing; the crop reads 45 (camera_proc.MouthPixels)
                   "expression": expression or {"emotion": "neutral", "intensity": 0.0}}
+        if ahead is not None:
+            result["ahead"] = {**st, "before_end": round(t0 - read["t"][-1], 3)}  # > 0: the reading was done before the end was confirmed
         result["nonverbal"] = nonverbal or nonverbal_dict(result["expression"])  # no camera (decode_file): every entry absent
         LAST["enc"] = enc; LAST["utt_id"] = uid
         if not greedy.strip():
@@ -117,19 +192,17 @@ def run_decode(rois, duration, source="webcam", label=None, t_crop=0.0, expressi
             broadcast({"type": "error", "utt_id": uid, "message": "No speech detected (mouth did not move enough). Mouth the phrase clearly while holding Listen."})
             result.update({"selected": None, "no_speech": True})
             return result
-        if STATE["mode"] == "phrase":
-            pd = phrase_decoder.decode(enc)
-            # how well does the best inventory phrase explain the video compared with the model's own free transcript?
-            greedy_score = engine.score_phrases(enc, [greedy])[0]["score"] if greedy.strip() else None
+        result["timing"] = LAST["timing"] = read["timing"]
+        if read["mode"] == "phrase":
+            pd = read["pd"]
+            greedy_score = pd["free_score"]
             best_vsr = max(r["vsr_score"] for r in pd["ranking"])
             gap = (greedy_score - best_vsr) if greedy_score is not None else 0.0
-            t4 = time.time()
             result.update({"selected": pd["selected"], "confidence": pd["confidence"], "margin": pd["margin"], "visual_top": pd["visual_top"],
                            "context_changed_choice": pd["context_changed_choice"], "ranking": pd["ranking"][:6],
                            "greedy_score": greedy_score, "best_phrase_score": best_vsr, "phrase_gap": gap,
                            "in_inventory": gap < PHRASE_GAP_THRESHOLD,
-                           "context": context.snapshot(), "latency_total": t4 - t0})
-            result["timing"] = _safe_timing(enc, pd["selected"]); LAST["timing"] = result["timing"]
+                           "context": context.snapshot(), "latency_total": latency["total"]})
             sel = pd["selected"]
             result["category"] = CATEGORY_OF.get(sel.lower())
             result["critical"] = sel.lower() in CRITICAL and pd["confidence"] >= CRITICAL_CONF
@@ -144,7 +217,7 @@ def run_decode(rois, duration, source="webcam", label=None, t_crop=0.0, expressi
                     decision.update(action="none", reason=f"unclear mouthed {sel.lower()} ({pd['confidence']:.0%}); the question stays open")
             result["action"] = "answer" if answered else decision["action"]
             set_status("idle")
-            broadcast({"type": "result", **result, "latency": {"lock": wait, "crop": t1 - t0 - wait, "encode": t2 - t1, "phrase": t4 - t3, "total": t4 - t0}})
+            broadcast({"type": "result", **result, "latency": latency})
             broadcast(decision)
             if decision["action"] == "confirm":
                 confirm_loop.start(decision, t0=t0)
@@ -152,16 +225,13 @@ def run_decode(rois, duration, source="webcam", label=None, t_crop=0.0, expressi
                 confirm_loop.cancel("superseded by a new utterance", ts=t0)
                 _patient_said(sel, uid, result["critical"], pd["confidence"], emotion=(expression or {}).get("emotion"))
         else:
-            set_status("processing", utt_id=uid, stage="beam")
-            nbest = engine.beam_search(enc, 5)
-            t4 = time.time()
+            nbest = read["nbest"]
             probs = _softmax([h["score"] for h in nbest])
             for h, p in zip(nbest, probs):
                 h["prob"] = p
-            result.update({"nbest": nbest, "selected": _pretty(nbest[0]["text"]), "confidence": probs[0], "context": context.snapshot(), "latency_total": t4 - t0})
-            result["timing"] = _safe_timing(enc, nbest[0]["text"]); LAST["timing"] = result["timing"]
+            result.update({"nbest": nbest, "selected": _pretty(nbest[0]["text"]), "confidence": probs[0], "context": context.snapshot(), "latency_total": latency["total"]})
             set_status("idle")
-            broadcast({"type": "result", **result, "latency": {"lock": wait, "crop": t1 - t0 - wait, "encode": t2 - t1, "beam": t4 - t3, "total": t4 - t0}})
+            broadcast({"type": "result", **result, "latency": latency})
             confirm_loop.cancel("superseded by a new utterance", ts=t0)
             context.add_history(nbest[0]["text"])
             _log("patient", _pretty(nbest[0]["text"]), confidence=probs[0], mode="open", emotion=(expression or {}).get("emotion"))
@@ -298,12 +368,37 @@ def _log(who, text, **kw):
     broadcast({"type": "log", "entry": rec})
 
 
+NURSE_PAUSE = 0.7  # s of silence after speech that ends the nurse's question
+NURSE_SILENCE_DB = -35  # dB; quieter than this is silence (a louder room never goes quiet: the recording runs to its limit)
+
+
+def record_until_silence(wav, seconds, source=("-f", "avfoundation", "-i", ":0")):
+    """Record `source` (the laptop mic) to a 16 kHz mono wav until NURSE_PAUSE s of silence follow speech, at most `seconds`.
+    A fixed 5 s recording made even a 1 s question wait 5 s before transcription began. Returns the seconds recorded."""
+    t0 = time.time()
+    p = subprocess.Popen(["ffmpeg", "-y", "-hide_banner", "-nostats", *source, "-t", str(seconds), "-af", f"silencedetect=noise={NURSE_SILENCE_DB}dB:d={NURSE_PAUSE}",
+                          "-ar", "16000", "-ac", "1", wav], stdin=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    heard = False  # speech so far: a silence that ended, or sound before the first silence
+    for line in p.stderr:
+        m = re.search(r"silence_(start|end): (-?[\d.]+)", line)
+        if not m:
+            continue
+        if m.group(1) == "end" or float(m.group(2)) > 0.3:
+            heard = True
+        if m.group(1) == "start" and heard:
+            p.stdin.write("q"); p.stdin.flush()  # ffmpeg's own stop: the wav is finalized
+            break
+    p.communicate()
+    return time.time() - t0
+
+
 def nurse_listen(seconds=5.0):
-    """Record the laptop mic (the caregiver speaking), transcribe with OpenAI, and drop it into context as the nurse prompt."""
+    """Record the laptop mic (the caregiver speaking) until they pause, transcribe with OpenAI, and drop it into context as
+    the nurse prompt."""
     import tempfile
     set_status("nurse_listening")
     wav = tempfile.mktemp(suffix=".wav")
-    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "avfoundation", "-i", ":0", "-t", str(seconds), "-ar", "16000", "-ac", "1", wav])
+    sessionlog.log("nurse_recorded", seconds=round(record_until_silence(wav, seconds), 2))
     set_status("idle")
     if not os.path.exists(wav):
         broadcast({"type": "error", "message": "microphone capture failed"}); return
@@ -376,11 +471,13 @@ def _load_aligner():
 
 def _keep_warm():
     """Apple GPU clocks down after ~1 s idle and the next encode costs 0.5-1.5 s instead of 0.05 s.
-    A tiny dummy encode (24 frames) every 0.4 s (0.2 s while listening) keeps the demo path fast."""
+    A tiny dummy encode (24 frames) every 0.4 s (0.2 s while listening) keeps the demo path fast. It holds the GPU for
+    60-100 ms, so it skips a tick while a hands-free utterance may be ending (its mouth is still): that utterance's
+    reading would wait behind it."""
     dummy = torch.zeros(1, 24, 88, 88)
     while True:
         try:
-            if not work_lock.locked():
+            if not work_lock.locked() and not ((camera.meta if camera else None) or {}).get("mouth_still"):
                 engine.encode(dummy)
         except Exception as e:
             print("[keepwarm]", e)
@@ -456,28 +553,43 @@ def api_tts(text: str, voice: str = None, cached_only: int = 0):
 @app.get("/api/tts_stream")
 def api_tts_stream(text: str, voice: str = None):
     """/api/tts for text that is not cached, streamed: the browser starts playing on the first chunk instead of after the
-    whole clip. Cached text is served whole. An upstream failure is logged and shown as an error; the stream then aborts:
-    before any audio the UI falls back to the browser voice, after it the patient hears the phrase cut short."""
+    whole clip. Cached text is served whole."""
     vid = _voice_id(voice)
     if not vid:
         return JSONResponse({"error": "no cloned voice available"}, status_code=503)
     audio = eltts.cached(text, vid)
     if audio is not None:
         return _mp3(audio, True)
+    return _stream_mp3(text, vid)
+
+
+def _stream_mp3(text, vid, on_first=None, on_done=None, **delivery):
+    """The ElevenLabs stream of a request that is not cached (tts.synth_stream; delivery = emotion, intensity, rate).
+    on_first() runs at its first chunk, on_done() once it completed. An upstream failure is logged and shown as an error;
+    the stream then aborts: before any audio the UI falls back to the browser voice, after it the phrase is cut short."""
     def gen():
+        first = True
         try:
-            yield from eltts.synth_stream(text, vid)
+            for chunk in eltts.synth_stream(text, vid, **delivery):
+                if first and on_first:
+                    on_first()
+                first = False
+                yield chunk
         except Exception as e:  # not GeneratorExit: a client that stops listening is not an error
             traceback.print_exc()
             broadcast({"type": "error", "message": f"ElevenLabs stream failed for {text!r}: {e}"})
             raise
+        if on_done:
+            on_done()
     return StreamingResponse(gen(), media_type="audio/mpeg", headers={"X-TTS-Cached": "False", "Cache-Control": "no-store"})
 
 
 @app.get("/api/say")
 def api_say(text: str, emotion: str = "neutral", intensity: float = 0.0, rate: float = 1.0, voice: str = None, retime: int = 1, utt_id: int = 0):
     """Expressive delivery: ElevenLabs (tag/stability/speed from emotion+intensity+rate) then per-word retiming to the
-    mouthed word durations of utterance `utt_id` (if it is the last one). Returns WAV + X-Delivery header with the report."""
+    mouthed word durations of utterance `utt_id` (if it is the last one). Returns WAV + X-Delivery header with the report;
+    with nothing to retime, the MP3 (streamed as it is generated if not cached: v3 synthesized whole took 1.1-3.1 s in
+    the session logs before a sound played)."""
     from fastapi.responses import Response
     vid = _voice_id(voice)
     if not vid:
@@ -487,21 +599,31 @@ def api_say(text: str, emotion: str = "neutral", intensity: float = 0.0, rate: f
     if not STATE.get("expressive", True):
         emotion, intensity = "neutral", 0.0
     t0 = time.time()
-    try:
-        mp3, cached, secs = eltts.synth(text, vid, emotion=emotion, intensity=intensity, rate=rate)
-    except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=502)
     plan = eltts.plan_delivery(text, emotion, intensity, rate)
     report = {"emotion": emotion, "intensity": intensity, "rate": rate, "tag": plan["tag"], "model": plan["model"], "stability": plan["settings"]["stability"],
-              "cached": cached, "t_synth": round(time.time() - t0, 2), "retime": {"applied": False}}
+              "retime": {"applied": False}}
     timing = LAST.get("timing") if utt_id and utt_id == LAST.get("utt_id") else None
     if retime and timing and prosody._mms is None:  # never a 2.6-25 s aligner load inside a spoken reply (_load_aligner)
         report["retime"] = {"applied": False, "reason": "voice aligner not loaded yet: match my pace was just switched on, or failed to load"}
         retime = 0
+    delivery = {"emotion": emotion, "intensity": intensity, "rate": rate}
     if not (retime and timing and timing.get("words")):  # nothing to retime: the clip as synthesized, no mp3 -> wav decode
-        report["total"] = round(time.time() - t0, 2)
+        mp3 = eltts.cached(text, vid, **delivery)
+        if mp3 is None:
+            def first():
+                report.update(cached=False, streamed=True, t_synth=round(time.time() - t0, 2))  # t_synth: to the first chunk
+            def done():
+                report["total"] = round(time.time() - t0, 2)
+                broadcast({"type": "delivery", "utt_id": utt_id, **report})
+            return _stream_mp3(text, vid, first, done, **delivery)
+        report.update(cached=True, t_synth=0.0, total=round(time.time() - t0, 2))
         broadcast({"type": "delivery", "utt_id": utt_id, **report})
-        return _mp3(mp3, cached, **{"X-Delivery": json.dumps({k: v for k, v in report.items() if k != "retime"})})
+        return _mp3(mp3, True, **{"X-Delivery": json.dumps({k: v for k, v in report.items() if k != "retime"})})
+    try:
+        mp3, cached, secs = eltts.synth(text, vid, **delivery)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=502)
+    report.update(cached=cached, t_synth=round(time.time() - t0, 2))
     wav, sr = prosody.mp3_to_wav(mp3)
     t1 = time.time()
     try:
@@ -910,12 +1032,37 @@ def _make_camera(spec):
     cam.on_auto_utterance = _on_auto_utterance
     cam.on_error = lambda m: (sessionlog.log("camera_error", message=m), broadcast({"type": "error", "message": f"camera: {m}"}))  # video source and hand-signal errors
     cam.on_signal = _on_camera_signal
+    cam.on_ahead = _on_ahead
     return cam
 
 
 def _on_auto_utterance(u):
-    set_status("processing", stage="auto")
-    threading.Thread(target=_decode_utterance, args=(u, f"{_source_kind()}-auto"), daemon=True).start()
+    source = f"{_source_kind()}-auto"
+    if u.get("ahead") is None:
+        set_status("processing", stage="auto")
+        threading.Thread(target=_decode_utterance, args=(u, source), daemon=True).start()
+        return
+    a = AHEAD[u["ahead"]] = _Ahead()
+    threading.Thread(target=_decode_ahead, args=(u, source, a), daemon=True).start()
+
+
+def _on_ahead(aid, confirmed):
+    a = AHEAD.pop(aid, None)
+    if a is None:
+        return
+    if confirmed:
+        set_status("processing", stage="auto")
+    a.settle(confirmed)
+
+
+def _decode_ahead(u, source, a):
+    """An auto utterance sent ahead of its confirmed end: read now, shown once confirmed (run_decode)."""
+    if u["rois"] is None or ENROLL["session"] is not None:  # an error to report, or an enrollment take: only once confirmed
+        if a.wait():
+            _decode_utterance(u, source)
+        return
+    run_decode(u["rois"], u["duration"], source=source, t_crop=u["t_crop"], expression=u.get("expression"), nonverbal=u.get("nonverbal"),
+               mouth_px=u.get("mouth_px"), ahead=a)
 
 
 def _decode_utterance(u, source="webcam"):

@@ -5,7 +5,7 @@ running MediaPipe made a 0.1 s encode take 1-15 s. The child process does all pe
 only 96x96 mouth crops for an utterance (~600 KB for 2.5 s) plus small preview JPEGs.
 """
 import multiprocessing as mp
-import threading, queue, time, collections, os, sys
+import threading, queue, time, collections, copy, os, sys
 import numpy as np
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -70,6 +70,13 @@ class IncrementalCropper:
     def feed(self, ts, rgb, lm):
         if ts >= self.start:
             self.ts.append(ts); self.items.append((ts, rgb, lm))
+
+    def copy(self):
+        """An independent copy whose finish() leaves this cropper able to go on (a speculative end, _worker): the lists are
+        copied, the frames and landmark arrays shared (neither is ever modified in place)."""
+        c = copy.copy(self)
+        c.ts, c.items, c.rgb, c.det, c.lm, c.rois = map(list, (self.ts, self.items, self.rgb, self.det, self.lm, self.rois))
+        return c
 
     def advance(self, safe):
         if not self.ts:
@@ -230,6 +237,11 @@ def _worker(conn, spec, width, height, preview_width, buffer_seconds):
     AUTO_ON, AUTO_OFF = 2.6, 1.6      # multiples of the noise floor
     MIN_ACTIVE, HANG, MIN_UTT, MAX_UTT, PRE_ROLL, POST_ROLL = 0.20, AUTO_HANG, 0.5, 6.0, 0.30, 0.15
     cropper = None          # IncrementalCropper of the utterance being captured (manual or auto)
+    # Hands-free: the frames of an utterance are fixed POST_ROLL after the mouth goes still (its end if the hang confirms it),
+    # HANG - POST_ROLL = 0.2 s before the hang does. The utterance is sent ahead then (`ahead` = its id): the server reads it
+    # during the rest of the hang, then ("ahead", id, True) publishes it, or ("ahead", id, False) drops it (the mouth moved
+    # again; that utterance goes on and ends later). Same frames either way, so the same result, 0.2 s sooner.
+    ahead, n_ahead = None, 0
 
     def begin(start):
         nonlocal cropper
@@ -237,17 +249,27 @@ def _worker(conn, spec, width, height, preview_width, buffer_seconds):
         for it in buffer:
             cropper.feed(*it)
 
-    def emit(start, end, tag):
+    def emit(start, end, tag, ahead_id=None):
+        """Send the utterance [start, end]; ahead_id: sent ahead of its confirmed end (see `ahead`), the capture goes on."""
         nonlocal cropper
-        expression = expr.finish()
-        c, cropper = cropper, None
+        if ahead_id is None:
+            expression = expr.finish()
+            c, cropper = cropper, None
+        else:
+            expression, c = expr.finish(reset=False), cropper.copy()
         t0 = time.time()
         rois, n_face, n_total, dur, err = c.finish(end)
         if err:
-            out.send(("utterance", None, n_face, n_total, dur, err, 0.0, tag)); return
+            out.send(("utterance", None, n_face, n_total, dur, err, 0.0, tag, None, None, None, ahead_id)); return
         mpx = [m for t, m in mouth_hist if start <= t <= end]
         out.send(("utterance", rois, n_face, n_total, dur, None, time.time() - t0, tag, expression, signals.summary(start, end, expression),
-                  round(float(np.median(mpx))) if mpx else None))
+                  round(float(np.median(mpx))) if mpx else None, ahead_id))
+
+    def settle_ahead(confirmed):
+        nonlocal ahead
+        if ahead is not None:
+            out.send(("ahead", ahead, confirmed))
+            ahead = None
 
     while True:
       try:
@@ -257,6 +279,7 @@ def _worker(conn, spec, width, height, preview_width, buffer_seconds):
         while conn.poll():
             cmd = conn.recv()
             if cmd[0] == "start":  # a manual listen takes over an auto utterance in progress (it was decoded twice)
+                settle_ahead(False)
                 listen_start = time.time(); expr.start(); begin(listen_start)
                 active_since = quiet_since = auto_start = None
             elif cmd[0] == "stop":
@@ -265,6 +288,7 @@ def _worker(conn, spec, width, height, preview_width, buffer_seconds):
                     out.send(("utterance", None, 0, 0, 0.0, "too short", 0.0, "manual")); continue
                 emit(start, time.time(), "manual")
             elif cmd[0] == "auto":
+                settle_ahead(False)
                 auto = bool(cmd[1]); active_since = quiet_since = auto_start = None
                 if listen_start is None:
                     cropper = None
@@ -369,12 +393,18 @@ def _worker(conn, spec, width, height, preview_width, buffer_seconds):
                     quiet_since = quiet_since or ts
                 else:
                     quiet_since = None
+                    settle_ahead(False)  # not the end after all
                 ended = (quiet_since is not None and ts - quiet_since >= HANG) or (ts - auto_start >= MAX_UTT)
+                end = (quiet_since or ts) + POST_ROLL
                 if ended:
-                    end = (quiet_since or ts) + POST_ROLL
-                    if end - auto_start - PRE_ROLL >= MIN_UTT:
+                    if ahead is not None:  # ended where it was sent: min(end, ts) is that same end, quiet_since + POST_ROLL
+                        settle_ahead(True)
+                    elif end - auto_start - PRE_ROLL >= MIN_UTT:
                         emit(auto_start, min(end, ts), "auto")
                     cropper = auto_start = active_since = quiet_since = None
+                elif ahead is None and quiet_since is not None and ts >= end and end - auto_start - PRE_ROLL >= MIN_UTT:
+                    n_ahead += 1; ahead = n_ahead
+                    emit(auto_start, end, "auto", ahead)
         if cropper is not None:  # the utterance cannot end before `safe`: crop what that makes final
             cropper.advance(ts if listen_start is not None or quiet_since is None else min(quiet_since + POST_ROLL, ts))
         fps_n += 1
@@ -412,6 +442,7 @@ def _worker(conn, spec, width, height, preview_width, buffer_seconds):
         meta = {"face": face, "fps": round(fps, 1), "frame_w": w, "frame_h": h, "bbox": bbox, "face_frac": round(face_frac, 3),
                 "mouth_px": round(mpx) if mpx else None, "mouth_px_need": round(mouth_px.need), "listening": listening, "n_frames": n_listen,
                 "auto": auto, "energy": round(energy, 2), "noise": round(noise or 0.0, 2), "mouth_active": bool(auto_start is not None),
+                "mouth_still": auto_start is not None and quiet_since is not None,  # the utterance may be ending: _keep_warm yields the GPU
                 "expression": expr.live_meta(), "source": src.info(), "preview_dropped": out.dropped, "hands": signals.status}
         if ok:
             out.preview(("preview", jpg.tobytes(), meta))
@@ -445,6 +476,7 @@ class CameraProcess:
         self.on_error = None
         self.stats = None
         self.on_signal = None  # must return immediately: it runs on the reader thread (the server only queues the signal)
+        self.on_ahead = None   # (id, confirmed) for an auto utterance sent ahead of its end; must return immediately (reader thread)
         self._quit = False
         threading.Thread(target=self._reader, daemon=True).start()
 
@@ -565,6 +597,9 @@ class CameraProcess:
         elif msg[0] == "utterance" and len(msg) > 7 and msg[7] == "auto":
             if self.on_auto_utterance:
                 self.on_auto_utterance(self._utt(msg))
+        elif msg[0] == "ahead":
+            if self.on_ahead:
+                self.on_ahead(msg[1], msg[2])
         elif msg[0] == "zoom":
             self.zoom_replies.put(msg)
         elif msg[0] in ("utterance", "snapshot"):  # replies to stop_listening / snapshot_last
@@ -578,7 +613,7 @@ class CameraProcess:
     def _utt(msg):
         return {"rois": msg[1], "n_face": msg[2], "n_total": msg[3], "duration": msg[4], "error": msg[5], "t_crop": msg[6] if len(msg) > 6 else 0.0,
                 "expression": msg[8] if len(msg) > 8 else None, "nonverbal": msg[9] if len(msg) > 9 else None,
-                "mouth_px": msg[10] if len(msg) > 10 else None}
+                "mouth_px": msg[10] if len(msg) > 10 else None, "ahead": msg[11] if len(msg) > 11 else None}
 
     def set_auto(self, on):
         self._auto = bool(on)

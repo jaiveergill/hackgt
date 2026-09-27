@@ -102,8 +102,10 @@ python scripts/captures.py rescore    # re-read every labelled clip with this ch
   notes (keyword overlap boosts phrases), and recent history. Context only re-weights VSR-supported candidates.
 * **Eval drawer**: save the last 6 s of webcam as a labelled sample for `scripts/eval.py`.
 * **Hands-free listening** ends an utterance once the mouth has been still for 0.35 s (`SR_AUTO_HANG` to change it;
-  `scripts/eval_hang.py` measures splits and false triggers per value). Latency, measured end to end with
-  `scripts/eval_latency.py`: `plans/PLAN_5_LATENCY.md`.
+  `scripts/eval_hang.py` measures splits and false triggers per value). Its frames are fixed 0.15 s into that stillness,
+  so the model reads it during the rest of the hang and the result shows as the hang runs out (`scripts/check_ahead.py`).
+  Latency, measured end to end with `scripts/eval_latency.py`: `plans/PLAN_5_LATENCY.md`.
+* **Nurse** (mic button): records until the nurse pauses for 0.7 s (5 s at most), then transcribes.
 
 * **Busy laptop?** `SR_HANDS=0` turns hand gestures off. They cost 13.5 ms on the frames they run on (every 2nd), 6.7 ms per
   frame on average (face tracking: 7 ms), so they only matter for the frame rate when the CPU is saturated; the ESP32's
