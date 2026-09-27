@@ -98,6 +98,7 @@ function handle(m){
   else if(m.type==='confirm'){onConfirm(m);}
   else if(m.type==='signal'){onSignal(m);}
   else if(m.type==='alert'){showAlert(m);}
+  else if(m.type==='llm_pick'){renderLLMPick(m);}
   else if(m.type==='nbest'){if(m.error)$('#nbest').textContent='beam n-best failed: '+m.error;else renderNbest(m.nbest);}
   else if(m.type==='llm'){renderLLM(m);}
   else if(m.type==='delivery'){const d=$('#delivrep');if(d){d.innerHTML=`delivered <b>${esc(m.emotion)}</b>${m.intensity?` ${(m.intensity*100).toFixed(0)}%`:''} · ${esc(m.model)}${m.tag?` · tag <code>${esc(m.tag)}</code>`:''} · stability ${esc(m.stability)} · speed ${m.rate.toFixed(2)}x · synth ${m.cached?'cached':m.streamed?`streamed, first audio ${esc(m.t_synth)} s`:esc(m.t_synth)+' s'}${m.retime&&m.retime.applied?` · retimed (global ${esc(m.retime.global)}x)`:(m.retime&&m.retime.reason?` · no retime: ${esc(m.retime.reason)}`:'')} · total ${esc(m.total)} s`;}renderAudioStrip(m.retime);}
@@ -138,6 +139,16 @@ function setBig(text,{question=false}={}){
 }
 function setRing(c){$('#ringarc').style.strokeDashoffset=c==null?326.7:326.7*(1-Math.max(0,Math.min(1,c)));$('#ringpct').textContent=c==null?'—':fmtPct(c);}
 function heroSet(state,src){const h=$('#hero');h.dataset.state=state;h.classList.remove('weak');if(src)h.dataset.src=src;$('#src').textContent=src||h.dataset.src;}
+function renderLLMPick(m){
+  // Phrase Mode LLM re-ranker: what it saw, what it picked, whether the lips supported it and what the server did with it
+  const conf=$('#conf');if(!conf||!last||last.utt_id!==m.utt_id)return;
+  let cls='warn',txt;
+  if(m.error)txt=`LLM unavailable (${m.error})`;
+  else if(m.pick==null)txt=`LLM: none of the candidates fits (${m.latency} s)`;
+  else if(m.applied){cls='ctx';txt=`LLM ${m.confidence}: “${m.pick}”${m.pick!==m.visual_top?` over lips' “${m.visual_top}”`:''} · ${m.note} · ${m.latency} s`;}
+  else txt=`LLM ${m.confidence} “${m.pick}” not applied: ${m.note}`;
+  const el=document.createElement('span');el.className='pill '+cls;el.title=m.reason||'';el.textContent=txt;conf.appendChild(el);
+}
 function render(m,quiet){  // quiet: a yes/no answering the open question, or nothing to say: Dev ranking only, the hero keeps the question
   if(!quiet)renderHero(m);
   const cd=$('#cands');cd.innerHTML='';

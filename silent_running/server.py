@@ -22,6 +22,7 @@ from silent_running.enroll import Profile, Enrollment, list_profiles, MIN_PHRASE
 from silent_running import tts as eltts
 from silent_running import prosody
 from silent_running import sessionlog
+from silent_running import icu_lm
 from silent_running import confirm as confirm_mod
 from silent_running import captures
 
@@ -30,15 +31,26 @@ app = FastAPI(title="Silent Running")
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
 
 LLM_MARGIN = 3.0  # nats; an LLM proposal is accepted only if the visual model scores it within this of the raw top hypothesis
+# Phrase Mode LLM re-ranker (context.OpenAIChooser.pick_phrase): consulted when the lips alone would not speak (confidence below
+# LLM_PICK_BELOW); its pick is accepted only if the lips score it within LLM_PICK_MARGIN nats of the visual top. A 'high' verified
+# pick speaks; 'medium' becomes the first question of the confirm loop; 'low' or -1 leaves the visual decision alone.
+LLM_PICK_BELOW = float(os.environ.get("SR_LLM_PICK_BELOW", 0.85))
+LLM_PICK_MARGIN = float(os.environ.get("SR_LLM_PICK_MARGIN", 8.0))
+LLM_PICK_CANDS = 10
+BANK_PATH = os.path.join(ROOT, "data", "icu", "bank.txt")
 PHRASE_GAP_THRESHOLD = 6.0  # nats; free transcript beating every phrase by more than this => "no phrase matched"
 STATE = {"mode": "phrase", "auto_listen": False, "voice": None, "expressive": True, "emotion_override": None, "llm_enabled": True, "status": "idle", "utt_id": 0, "warm": False, "profile": None, "enroll": None, "pace": False}
 clients = set()
 loop = None
 engine = camera = context = phrase_decoder = llm = confirm_loop = capture = None
-phrases = load_phrases()
+phrases = load_phrases()            # the curated inventory: what the UI lists and the voice bank pre-synthesizes
 PHRASE_TABLE = load_phrase_table()
-CRITICAL = {r["phrase"].lower() for r in PHRASE_TABLE if r["critical"]}
-CATEGORY_OF = {r["phrase"].lower(): r["category"] for r in PHRASE_TABLE}
+BANK_TABLE = load_phrase_table(BANK_PATH) if os.path.exists(BANK_PATH) else []   # generated ICU utterance bank: extra decoder candidates
+_seen = {r["phrase"].lower() for r in PHRASE_TABLE}
+BANK_TABLE = [r for r in BANK_TABLE if r["phrase"].lower() not in _seen]
+candidates_all = phrases + [r["phrase"] for r in BANK_TABLE]
+CRITICAL = {r["phrase"].lower() for r in PHRASE_TABLE + BANK_TABLE if r["critical"]}
+CATEGORY_OF = {r["phrase"].lower(): r["category"] for r in PHRASE_TABLE + BANK_TABLE}
 CRITICAL_CONF = 0.5
 LOG = []  # conversation log: [{ts, who, text, ...}]
 ENROLL = {"session": None}  # active enroll.Enrollment while the patient is enrolling; captured utterances go there instead of decoding
@@ -99,7 +111,7 @@ def _read(rois, mode, on_greedy=None):
         r["pd"] = phrase_decoder.decode(r["enc"], free=r["greedy"])
         text = r["pd"]["selected"]
     else:
-        r["nbest"] = engine.beam_search(r["enc"], 5)
+        r["nbest"], r["segments"] = engine.beam_search_segments(r["enc"], 5)  # long utterances: per-sentence, loop-guarded
         text = r["nbest"][0]["text"]
     r["t"].append(time.time())
     r["timing"] = _safe_timing(r["enc"], text)
@@ -206,6 +218,7 @@ def run_decode(rois, duration, source="webcam", label=None, t_crop=0.0, expressi
             sel = pd["selected"]
             result["category"] = CATEGORY_OF.get(sel.lower())
             result["critical"] = sel.lower() in CRITICAL and pd["confidence"] >= CRITICAL_CONF
+            _llm_rerank(result, pd, greedy)
             decision = confirm_mod.plan(result)
             answered = False
             if confirm_loop.pending() and sel.lower() in ("yes", "no"):  # a mouthed answer to "Sounds like: X?"
@@ -238,6 +251,45 @@ def run_decode(rois, duration, source="webcam", label=None, t_crop=0.0, expressi
             if STATE["llm_enabled"] and llm is not None:
                 threading.Thread(target=_bg_llm, args=(nbest, uid, enc), daemon=True).start()
         return result
+
+
+def _llm_rerank(result, pd, greedy):
+    """Phrase Mode: let the LLM re-rank the top candidates with context when the lips alone would not speak. Mutates `result`
+    (selected / confidence / ranking) so the confirm loop and UI see the re-ranked answer; records what happened in result["llm_pick"]."""
+    if not (STATE.get("llm_enabled") and llm is not None and llm.available()):
+        return
+    if result.get("critical") or pd["confidence"] >= LLM_PICK_BELOW:
+        return
+    rows = [r for r in pd["ranking"] if not r.get("prefiltered_out")][:LLM_PICK_CANDS]
+    if len(rows) < 2:
+        return
+    ctx = context.snapshot(); ctx["recent_utterances"] = ctx.pop("history", [])
+    t0 = time.time()
+    out = llm.pick_phrase(greedy, [{"text": r["phrase"], "prob": r["final_prob"], "rank": i + 1} for i, r in enumerate(rows)], ctx)
+    dt = time.time() - t0
+    rec = {"type": "llm_pick", "utt_id": result["utt_id"], "latency": round(dt, 2), "model": llm.model, "transcript": greedy, "visual_top": rows[0]["phrase"],
+           "visual_conf": round(pd["confidence"], 3)}
+    if not out or "error" in out:
+        rec.update(error=(out or {}).get("error", "no response")); broadcast(rec); result["llm_pick"] = rec; return
+    i, conf, reason = out["index"], out["confidence"], out.get("reason", "")
+    if i < 0:
+        rec.update(pick=None, confidence=conf, reason=reason, applied=False, note="LLM: none of the candidates fits")
+        broadcast(rec); result["llm_pick"] = rec; return
+    pick = rows[i]
+    gap = pick["final_score"] - rows[0]["final_score"]
+    verified = gap >= -LLM_PICK_MARGIN
+    rec.update(pick=pick["phrase"], confidence=conf, reason=reason, gap=round(gap, 2), verified=verified)
+    if not verified or conf == "low":
+        rec.update(applied=False, note="lips do not support it" if not verified else "LLM not confident: visual decision stands")
+        broadcast(rec); result["llm_pick"] = rec; return
+    # apply: the pick becomes the selection with a confidence the confirm loop understands (>= SPEAK_CONF speaks, below asks)
+    new_conf = max(pick["final_prob"], 0.75) if conf == "high" else min(max(pick["final_prob"], 0.45), confirm_mod.SPEAK_CONF - 0.01)
+    ranking = [dict(pick, final_prob=new_conf)] + [dict(r) for r in pd["ranking"] if r is not pick]
+    result.update(selected=pick["phrase"], confidence=new_conf, ranking=ranking[:6], context_changed_choice=pick["phrase"] != pd["visual_top"],
+                  category=CATEGORY_OF.get(pick["phrase"].lower()), critical=pick["phrase"].lower() in CRITICAL and new_conf >= CRITICAL_CONF)
+    result["timing"] = _safe_timing(LAST["enc"], pick["phrase"]); LAST["timing"] = result["timing"]
+    rec.update(applied=True, new_confidence=round(new_conf, 3), note="spoken" if new_conf >= confirm_mod.SPEAK_CONF else "asked first")
+    broadcast(rec); result["llm_pick"] = rec
 
 
 def _bg_nbest():
@@ -1149,6 +1201,8 @@ def main():
     ap.add_argument("--decode-device", default="cpu")
     ap.add_argument("--ctc-weight", type=float, default=0.1)
     ap.add_argument("--gamma", type=float, default=1.0)
+    ap.add_argument("--lm-weight", type=float, default=float(os.environ.get("SR_LM_WEIGHT", 0.3)), help="ICU n-gram LM weight in the beam search and candidate scoring (0 = off)")
+    ap.add_argument("--no-bank", action="store_true", help="decode against the curated phrases only, not the generated ICU bank")
     ap.add_argument("--llm", default="gpt-4o-mini")
     ap.add_argument("--model-dir", default=None, help="VSR checkpoint dir (default models/LRS3_V_WER19.1; use models/adapted_<name> after scripts/adapt.py)")
     ap.add_argument("--voice", default=None, help="default TTS voice: cloned speaker name or stock ElevenLabs voice name (e.g. Bella)")
@@ -1170,7 +1224,13 @@ def main():
     engine.warmup(phrases)
     print(f"[engine] loaded + warmed in {time.time()-t0:.1f}s (encoder on {engine.device}, decoder on {engine.decode_device}, phrase scoring on {engine.score_device})")
     context = ContextStore()
-    phrase_decoder = PhraseDecoder(engine, phrases, context, gamma=args.gamma)
+    if args.lm_weight > 0 and os.path.exists(icu_lm.CORPUS):
+        t = time.time(); engine.set_lm(icu_lm.load(engine), args.lm_weight)
+        print(f"[icu_lm] fused into beam search + candidate scoring, weight {args.lm_weight} ({time.time()-t:.1f}s)")
+    cands = phrases if args.no_bank else candidates_all
+    t = time.time()
+    phrase_decoder = PhraseDecoder(engine, cands, context, gamma=args.gamma)
+    print(f"[decoder] {len(cands)} candidates ({len(phrases)} curated + {len(cands)-len(phrases)} bank) ready in {time.time()-t:.1f}s")
     if args.profile:
         try:
             _set_profile(_load_ready_profile(args.profile))
