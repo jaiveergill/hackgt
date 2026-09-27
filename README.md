@@ -22,7 +22,7 @@ uv pip install -r requirements.txt
 python -m silent_running.server            # http://127.0.0.1:8000
 ```
 
-Open Mode's LLM uses the OpenAI API (`gpt-4o-mini`); put `OPENAI_API_KEY=...` in `.env`. It never runs on the primary Phrase Mode path.
+Open Mode's interpreter is Grok by default (`XAI_API_KEY=...` in `.env`, model `grok-4.20-0309-non-reasoning`); `--llm-provider openai` uses `OPENAI_API_KEY` and `gpt-4o-mini`. It proposes up to 3 sentences the patient most plausibly meant, the lip model scores each against the video, and the most likely one within 3 nats of the raw reading is used (none: the raw reading stands). It never runs on the Phrase Mode path.
 Voice output: browser voices by default; with `ELEVEN_LABS_API_KEY` in `.env` the UI lists ElevenLabs stock voices (`--voice Bella`), and cloned voices once the account tier allows Instant Voice Cloning (see `plans/PLAN_3_VOICE_CLONING.md`).
 
 ## ESP32-CAM glasses: use the USB cable, not WiFi

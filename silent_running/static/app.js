@@ -329,6 +329,7 @@ function renderLLM(m){
   else if(m.accepted)verdict=`<span class="pill ok">accepted · video supports it (${m.gap.toFixed(1)} nats vs raw)</span>`;
   else verdict=`<span class="pill warn">rejected · video does not support it (${m.gap.toFixed(1)} nats vs raw) · kept raw</span>`;
   $('#llmout').innerHTML=`<div><b>${esc(m.corrected)}</b> ${verdict} <span class="small">· ${esc(m.model)} · ${ms(m.latency)}</span></div>`+(m.changed?`<div class="why">LLM proposed “${esc(m.proposal)}” instead of “${esc(raw)}”. ${esc(m.reason)}</div>`:`<div class="why">${esc(m.reason)}</div>`);
+  if(m.alternatives&&m.alternatives.length>1)$('#llmout').insertAdjacentHTML('beforeend',`<div class="why">considered: ${m.alternatives.map(a=>`${esc(a.text)} <span class="small">(${a.gap.toFixed(1)} nats${a.fits?'':' · video: no'})</span>`).join(' · ')}</div>`);
   if(m.changed&&m.accepted){setBig(m.corrected);heroSet('result','fused');$('#conf').insertAdjacentHTML('beforeend',`<span class="pill ctx">context-corrected: ${esc(wordDiff(raw,m.corrected))} · verified by the visual model</span>`);}
   speakOnce(last.utt_id,(m.changed&&m.accepted)?m.corrected:last.selected);
 }

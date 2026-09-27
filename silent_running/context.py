@@ -68,45 +68,56 @@ class ContextStore:
         return out
 
 
-class OpenAIChooser:
-    """OpenAI proposer for Open Mode's verified correction (server._bg_llm). Never on the Phrase Mode path.
-    Reads OPENAI_API_KEY from the environment / project .env."""
-    def __init__(self, model="gpt-4o-mini", timeout=20):
+# LLM providers, all through the OpenAI-compatible chat API: (key variable, base URL, default model). Grok default: the fastest
+# of the account's models on this task (1.5-1.9 s per call; grok-4.3 took 4.7-11.5 s, grok-4.7 8.8-10.4 s), and Open Mode
+# speaks only after the verdict, so this latency is added to every sentence.
+LLM_PROVIDERS = {"grok": ("XAI_API_KEY", "https://api.x.ai/v1", "grok-4.20-0309-non-reasoning"),
+                 "openai": ("OPENAI_API_KEY", None, "gpt-4o-mini")}
+
+
+class LLMInterpreter:
+    """Open Mode's interpreter (server._bg_llm): proposes what the patient meant; the visual model verifies each proposal.
+    provider: grok (XAI_API_KEY) | openai (OPENAI_API_KEY), read from the environment / project .env."""
+    def __init__(self, provider="grok", model=None, timeout=20):
         from dotenv import load_dotenv
         load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env"))
-        self.model = model
-        self.key = os.environ.get("OPENAI_API_KEY", "")
+        self.key_var, base_url, default_model = LLM_PROVIDERS[provider]
+        self.provider, self.model = provider, model or default_model
+        self.key = os.environ.get(self.key_var, "")
         self.client = None
         if self.key:
             from openai import OpenAI
-            self.client = OpenAI(api_key=self.key, timeout=timeout)
+            self.client = OpenAI(api_key=self.key, base_url=base_url, timeout=timeout)
 
     def available(self):
         return self.client is not None
 
     def propose(self, candidates, context):
-        """Generative error correction: propose ONE corrected sentence built from the visual hypotheses.
-        The caller must verify the proposal against the visual model before using it."""
+        """Up to 3 sentences the patient most plausibly meant, most likely first. The caller must verify each against the
+        visual model before using it."""
         if self.client is None:
-            return {"error": "OPENAI_API_KEY not set"}
-        sys_p = ("You are correcting the output of a silent lip-reading model for a voiceless ICU patient. You get the model's n-best "
-                 "hypotheses (higher score = more visual support; they usually share the correct skeleton and differ in confusable words) "
-                 "plus context. Lip reading confuses sounds that look alike on the lips: p/b/m, t/d/n, k/g, f/v, s/z, and most vowels. "
-                 "Write the single most plausible sentence the person actually said, replacing only words with visually similar "
-                 "alternatives. If no correction is clearly better, return the top hypothesis unchanged: a wrong sentence is worse than "
-                 "an uncorrected one. Do not add new ideas. Output plain text in upper case without punctuation.")
+            return {"error": f"{self.key_var} not set"}
+        sys_p = ("You interpret the output of a silent lip-reading model for a voiceless ICU patient. You get the model's n-best "
+                 "hypotheses (higher score = more visual support) plus any context. They are often garbled or ungrammatical: lip "
+                 "reading confuses sounds that look alike on the lips (p/b/m, t/d/n, k/g, f/v, s/z, most vowels) and drops or merges "
+                 "short words. Write up to 3 natural sentences the patient most plausibly meant, most likely first, with similar mouth "
+                 "shapes; if the top hypothesis is not a sentence a person would say, do not repeat it. The lip model checks every "
+                 "one against the video. Output plain text in upper case without punctuation.")
         lines = "\n".join(f"{i}. {c['text']} (score {c['score']:.1f})" for i, c in enumerate(candidates))
-        ctx = {k: (v[:200] if k == "notes" else v) for k, v in context.items() if v}  # only what exists (rarely a nurse question); notes capped
+        ctx = {k: (v[:200] if k == "notes" else v) for k, v in context.items() if v}  # only what exists; notes capped
         user = (f"Context: {json.dumps(ctx)}\n" if ctx else "") + f"Hypotheses:\n{lines}"
-        schema = {"type": "object", "additionalProperties": False, "properties": {"sentence": {"type": "string"}, "reason": {"type": "string"}}, "required": ["sentence", "reason"]}
+        schema = {"type": "object", "additionalProperties": False,
+                  "properties": {"sentences": {"type": "array", "items": {"type": "string"}}, "reason": {"type": "string"}},
+                  "required": ["sentences", "reason"]}
         try:
             r = self.client.chat.completions.create(model=self.model, temperature=0,
                 messages=[{"role": "system", "content": sys_p}, {"role": "user", "content": user}],
                 response_format={"type": "json_schema", "json_schema": {"name": "proposal", "strict": True, "schema": schema}})
             out = json.loads(r.choices[0].message.content)
-            sent = re.sub(r"[^A-Z' ]", "", out.get("sentence", "").upper()).strip()
-            if not sent:
+            sents = [re.sub(r"[^A-Z' ]", "", t.upper()).strip() for t in out.get("sentences", [])]
+            sents = list(dict.fromkeys(t for t in sents if t))[:3]
+            if not sents:
                 return {"error": "empty proposal"}
-            return {"sentence": sent, "reason": out.get("reason", "")}
+            return {"sentences": sents, "reason": out.get("reason", "")}
         except Exception as e:
             return {"error": str(e)}

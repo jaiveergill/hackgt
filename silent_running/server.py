@@ -1,6 +1,6 @@
 """Silent Running server: webcam -> face tracking -> pretrained VSR -> constrained/contextual decoding -> UI.
 
-  python -m silent_running.server [--camera 0] [--port 8000] [--device mps] [--llm gpt-4o-mini]
+  python -m silent_running.server [--camera 0] [--port 8000] [--device mps] [--llm-provider grok|openai] [--llm MODEL]
 """
 import os, sys, json, time, asyncio, threading, argparse, subprocess, re, queue, traceback
 sys.setswitchinterval(0.0005)  # many tiny torch ops on MPS/CPU must not wait 5 ms behind the camera thread each
@@ -16,7 +16,7 @@ sys.path.insert(0, ROOT)
 from silent_running.vsr import VSREngine, load_phrases, load_phrase_table, _read_video
 from silent_running.camera_proc import CameraProcess
 from silent_running.signals.aggregate import nonverbal_dict
-from silent_running.context import ContextStore, OpenAIChooser
+from silent_running.context import ContextStore, LLMInterpreter
 from silent_running.decoder import PhraseDecoder
 from silent_running.enroll import Profile, Enrollment, list_profiles, MIN_PHRASES
 from silent_running import tts as eltts
@@ -258,27 +258,27 @@ def _bg_nbest():
 
 
 def _bg_llm(nbest, uid, enc):
-    """Open Mode contextual decoding: the LLM PROPOSES one corrected sentence from the n-best + context, the visual
-    model VERIFIES it by scoring the proposal against the video. Accepted only if within LLM_MARGIN nats of the raw
-    top hypothesis. Both the proposal and the verdict are broadcast so the UI shows exactly what happened."""
+    """Open Mode interpretation: the LLM PROPOSES up to 3 sentences the patient most plausibly meant (n-best + context), the
+    visual model VERIFIES them in one batch against the video. The LLM's most likely proposal within LLM_MARGIN nats of the
+    raw top hypothesis wins; none -> the raw top stands. Every proposal and the verdict are broadcast so the UI shows exactly
+    what happened."""
     t0 = time.time()
     ctx = context.snapshot()
     ctx["recent_utterances"] = ctx.pop("history", [])
     out = llm.propose([{"text": h["text"], "score": h["score"]} for h in nbest], ctx)
-    dt = time.time() - t0
     if not out or "error" in out:
-        broadcast({"type": "llm", "utt_id": uid, "error": (out or {}).get("error", "no response"), "latency": dt}); return
+        broadcast({"type": "llm", "utt_id": uid, "error": (out or {}).get("error", "no response"), "latency": time.time() - t0}); return
     top = nbest[0]["text"].strip().upper()
-    prop = out["sentence"]
-    if prop == top:
-        broadcast({"type": "llm", "utt_id": uid, "proposal": _pretty(prop), "reason": out["reason"], "gap": 0.0, "accepted": True, "changed": False,
-                   "corrected": _pretty(top), "latency": dt, "model": llm.model}); return
+    props = out["sentences"]
     with work_lock:
-        sc = {r["phrase"]: r["score"] for r in engine.score_phrases(enc, [prop, top])}
-    gap = sc[prop] - sc[top]
-    accepted = gap >= -LLM_MARGIN
-    broadcast({"type": "llm", "utt_id": uid, "proposal": _pretty(prop), "reason": out["reason"], "gap": gap, "accepted": accepted, "changed": True,
-               "corrected": _pretty(prop if accepted else top), "latency": time.time() - t0, "model": llm.model})
+        sc = {r["phrase"]: r["score"] for r in engine.score_phrases(enc, list(dict.fromkeys([top] + props)))}
+    gaps = {p: sc[p] - sc[top] for p in props}
+    chosen = next((p for p in props if gaps[p] >= -LLM_MARGIN), None)
+    proposal = chosen or props[0]
+    broadcast({"type": "llm", "utt_id": uid, "proposal": _pretty(proposal), "reason": out["reason"], "gap": gaps[proposal],
+               "accepted": chosen is not None, "changed": proposal != top, "corrected": _pretty(chosen or top),
+               "alternatives": [{"text": _pretty(p), "gap": gaps[p], "fits": gaps[p] >= -LLM_MARGIN} for p in props],
+               "latency": time.time() - t0, "model": f"{llm.provider} {llm.model}"})
 
 
 LAST = {"enc": None, "utt_id": 0}
@@ -1149,7 +1149,8 @@ def main():
     ap.add_argument("--decode-device", default="cpu")
     ap.add_argument("--ctc-weight", type=float, default=0.1)
     ap.add_argument("--gamma", type=float, default=1.0)
-    ap.add_argument("--llm", default="gpt-4o-mini")
+    ap.add_argument("--llm-provider", default="grok", choices=["grok", "openai"], help="Open Mode's interpreter: grok (XAI_API_KEY) | openai (OPENAI_API_KEY)")
+    ap.add_argument("--llm", default=None, help="model name (default: the provider's, see context.LLM_PROVIDERS)")
     ap.add_argument("--model-dir", default=None, help="VSR checkpoint dir (default models/LRS3_V_WER19.1; use models/adapted_<name> after scripts/adapt.py)")
     ap.add_argument("--voice", default=None, help="default TTS voice: cloned speaker name or stock ElevenLabs voice name (e.g. Bella)")
     ap.add_argument("--no-camera", action="store_true")
@@ -1183,8 +1184,8 @@ def main():
                                        "scoring": {k: v for k, v in os.environ.items() if k.startswith("SR_")}})
         print(f"[capture] logging live utterances to {os.path.relpath(capture.path, ROOT)}")
     threading.Thread(target=_signal_worker, daemon=True).start()  # camera signals, including cameras created later via /api/source
-    llm = OpenAIChooser(model=args.llm)
-    print(f"[llm] openai {args.llm} available={llm.available()}")
+    llm = LLMInterpreter(provider=args.llm_provider, model=args.llm)
+    print(f"[llm] {llm.provider} {llm.model} available={llm.available()}" + ("" if llm.available() else f" (set {llm.key_var} in .env)"))
     try:
         sha = subprocess.run(["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True, cwd=ROOT).stdout.strip()
     except Exception:
