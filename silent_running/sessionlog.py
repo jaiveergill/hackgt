@@ -54,8 +54,8 @@ def _jsonable(v):
 
 # fields worth keeping from each broadcast event type (everything else in the event is UI payload)
 _KEEP = {
-    "result": ("utt_id", "mode", "selected", "confidence", "margin", "n_frames", "duration", "source", "latency", "in_inventory", "phrase_gap", "raw_greedy", "critical", "mouth_px"),
-    "delivery": ("utt_id", "cached", "t_synth", "total", "model"),
+    "result": ("utt_id", "mode", "selected", "confidence", "margin", "n_frames", "duration", "source", "latency", "ahead", "in_inventory", "phrase_gap", "raw_greedy", "critical", "mouth_px"),
+    "delivery": ("utt_id", "cached", "streamed", "t_synth", "total", "model"),
     "alert": ("utt_id", "text", "confidence"),
     "error": ("utt_id", "message"),
     "status": ("status", "stage", "utt_id"),

@@ -103,13 +103,13 @@ class StubEngine:
     def to_model_input(self, rois): return np.zeros((1, len(rois), 88, 88), np.float32)
     def encode(self, x): return "enc"
     def ctc_greedy(self, enc): return "YES"
-    def score_phrases(self, enc, phrases): return [{"phrase": p, "score": -1.0} for p in phrases]
 
 
 class StubPhraseDecoder:  # a confident, in-inventory "Yes"
-    def decode(self, enc):
+    def decode(self, enc, free=None):
         rows = [{"phrase": "Yes", "vsr_score": -1.0, "final_prob": 0.9}, {"phrase": "No", "vsr_score": -4.0, "final_prob": 0.1}]
-        return {"ranking": rows, "selected": "Yes", "confidence": 0.9, "margin": 3.0, "visual_top": "Yes", "context_changed_choice": False}
+        return {"ranking": rows, "selected": "Yes", "confidence": 0.9, "margin": 3.0, "visual_top": "Yes", "context_changed_choice": False,
+                "free_score": -1.0}
 
 
 server.engine, server.phrase_decoder = StubEngine(), StubPhraseDecoder()

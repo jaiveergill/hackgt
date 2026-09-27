@@ -2,7 +2,7 @@
 
   create_voice(speaker, wav_paths)    -> voice_id   (Instant Voice Clone; stored in data/voices/<speaker>.json)
   synth(text, voice_id)               -> mp3 bytes  (cached by sha1(voice_id, text) in data/tts_cache/)
-  synth_stream(text, voice_id)        -> the same, chunk by chunk as it is generated
+  synth_stream(text, voice_id, ...)   -> the same, chunk by chunk as it is generated
   prewarm_phrase_bank(voice_id)       -> synthesizes every phrase in phrases.txt so Phrase Mode plays instantly
 """
 import os, json, hashlib, subprocess, tempfile, time
@@ -163,10 +163,11 @@ def synth(text, voice_id, use_cache=True, emotion="neutral", intensity=0.0, rate
     return audio, False, time.time() - t0
 
 
-def synth_stream(text, voice_id):
-    """Neutral speech, yielded chunk by chunk as ElevenLabs generates it (the same request as synth), for text that is not
-    cached. The clip is cached only once the stream has completed: one the client dropped or that failed upstream is not."""
-    plan, p = _plan(text, voice_id, "neutral", 0.0, 1.0)
+def synth_stream(text, voice_id, emotion="neutral", intensity=0.0, rate=1.0):
+    """synth(), yielded chunk by chunk as ElevenLabs generates it, for a request that is not cached. v3 (the emotions)
+    streams too: "[angry] I can't breathe" started 0.58 s after the request, and the whole clip took 0.85-1.0 s. The clip is
+    cached only once the stream has completed: one the client dropped or that failed upstream is not."""
+    plan, p = _plan(text, voice_id, emotion, intensity, rate)
     c = _client()
     if c is None:
         raise RuntimeError("ELEVENLABS_API_KEY not set in .env")
