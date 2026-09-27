@@ -992,6 +992,12 @@ def main():
     ap.add_argument("--profile", default=None, help="enrolled patient profile to activate at start (data/profiles/<name>.pt)")
     ap.add_argument("--confirm-timeout", type=float, default=confirm_mod.TIMEOUT, help="seconds to wait for a nod/shake after 'Sounds like: X?'")
     args = ap.parse_args()
+    if (args.source or "").startswith("serial"):
+        # The ESP32-CAM's CH340 buffers 32 bytes (~0.2 ms at 1.5 Mbaud) and macOS drains it from a user-space driver
+        # (com.apple.DriverKit-AppleUSBCHCOM) that competes for the CPU: when it runs late, bytes are lost and it can wedge.
+        # Our processes (the capture process inherits this) yield to it. 3-min soaks under load: 1 wedge, 27.1 fps, 3.2%
+        # damaged frames at normal priority; none, 30.2 fps, 2.0% with the load at lower priority.
+        os.nice(10)
     t0 = time.time()
     engine = VSREngine(device=args.device, decode_device=args.decode_device, beam_size=10, ctc_weight=args.ctc_weight, **({"model_dir": args.model_dir} if args.model_dir else {}))
     STATE["model_dir"] = os.path.relpath(args.model_dir, ROOT) if args.model_dir else "models/LRS3_V_WER19.1"

@@ -46,8 +46,11 @@ registers, so the zoom is computed for it (`sources.ov3660_window`; the board an
 WiFi). 2x reads the centre half of the view binned 1:1 instead of scaled by half: 2x the pixels across the mouth at the same
 timing, measured 29-32 fps on the board, switched live in 0.2-0.3 s by the **1x / 2x** toggle on the camera view
 (`POST /api/zoom?zoom=2`). Byte loss on the cable is host-load dependent: 0% with the camera alone, 2-6% of frames with the
-full app running (the bytes never reach macOS's serial buffer: the CH340 or Apple's driver drops them); each such frame is
-dropped by its CRC-32.
+full app running; each such frame is dropped by its CRC-32. Root cause: the CH340 buffers 32 bytes (~0.2 ms at 1.5 Mbaud) and
+macOS drains it from a user-space driver (com.apple.DriverKit-AppleUSBCHCOM) that competes for the CPU; when it runs late,
+bytes are lost, and sometimes it wedges until the port is reopened (a standalone reader under the same load saw both).
+The server runs at lower priority with `--source serial` so the driver wins; the reopen is detected after 0.5 s. WCH's
+own driver made it worse (24% damaged). A CP2102/FTDI adapter (hundreds of bytes of buffer) would remove it at the source.
 ## Session logs (read these when something lagged)
 
 Every server start writes `logs/session_<timestamp>.jsonl` (`logs/latest.jsonl` points at the newest). It records, every 5 s,
