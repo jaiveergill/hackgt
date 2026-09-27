@@ -8,10 +8,14 @@
 // (XOR of the 4 length bytes and 0xA5: a damaged header is rejected at once) + the payload's CRC-32 (uint32 LE, zlib's) +
 // payload. Host side: sources.serial_header.
 //   type 'J': one JPEG frame (always the newest the sensor has: CAMERA_GRAB_LATEST).
-//   type 'T': text: "ready" after boot, "ok <command>" / "err <command>" for every command, "err ..." on a capture failure.
+//   type 'T': text: "ready" after boot, "ok <command>[ <result>]" / "err <command>" for every command, "err ..." on a
+//   capture failure.
 //   "ok" comes only after the frames buffered before the change are discarded: every frame after it has the new settings.
 // Host -> board: one command per line.
-//   set framesize <n> | set quality <n> | win <sx> <offx> <offy> <tx> <ty> <ox> <oy>   (the sensor window, as /resolution)
+//   set framesize <n> | set quality <n>
+//   win <sx> <sy> <ex> <ey> <offx> <offy> <tx> <ty> <ox> <oy> <scale> <binning>   the sensor's set_res_raw, as /resolution
+//     (what the numbers mean depends on the sensor: this board's is an OV3660, see sources.ov3660_window)
+//   sensor   answers "ok sensor <esp_camera PID, hex>" (3660 for an OV3660)
 // Flash: Arduino IDE or arduino-cli, board "AI Thinker ESP32-CAM" (esp32:esp32:esp32cam). Opening the port on macOS resets
 // the board once (DTR/RTS are wired to EN/IO0); the host then waits for "ready" and keeps both released so it runs.
 
@@ -100,13 +104,17 @@ static void handle(String line) {
   line.trim();
   if (!line.length()) return;
   sensor_t *s = esp_camera_sensor_get();
-  int v[7], r = -1;
+  int v[12], r = -1;
   if (line.startsWith("set framesize ")) {
     r = s->set_framesize(s, (framesize_t)line.substring(14).toInt());
   } else if (line.startsWith("set quality ")) {
     r = s->set_quality(s, line.substring(12).toInt());
-  } else if (line.startsWith("win ") && sscanf(line.c_str() + 4, "%d %d %d %d %d %d %d", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &v[6]) == 7) {
-    r = s->set_res_raw(s, v[0], 0, 0, 0, v[1], v[2], v[3], v[4], v[5], v[6], false, false);
+  } else if (line.startsWith("win ") && sscanf(line.c_str() + 4, "%d %d %d %d %d %d %d %d %d %d %d %d", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5],
+                                                &v[6], &v[7], &v[8], &v[9], &v[10], &v[11]) == 12) {
+    r = s->set_res_raw(s, v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7], v[8], v[9], v[10] != 0, v[11] != 0);
+  } else if (line == "sensor") {
+    reply("ok sensor " + String(s->id.PID, HEX));
+    return;
   }
   for (int i = 0; r == 0 && i < FB_COUNT; i++) {  // frames captured before the change: never sent
     camera_fb_t *fb = esp_camera_fb_get();
