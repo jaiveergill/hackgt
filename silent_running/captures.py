@@ -10,7 +10,7 @@ Layout (commit it: `git add data/captures && git push`; teammates' sessions neve
 Line types: "session" (first line: host, code version, camera, inventory, scoring settings), "utterance" (clip, source,
 frames), and the UI events as broadcast: "result" (ranking trimmed to the top 10), "decision", "confirm", then "label"
 (the corrected text). scripts/captures.py reads them back, re-scores labelled clips with the current code, and reports.
-Only camera sources (webcam/usb/stream, e.g. the ESP32-CAM) are captured by default; SR_CAPTURE=all adds live file playback (e.g. a phone recording
+Only camera sources (webcam/usb/stream/serial, e.g. the ESP32-CAM) are captured by default; SR_CAPTURE=all adds live file playback (e.g. a phone recording
 replayed with --source file:...); SR_CAPTURE=0 turns capture off. /api/decode_file is never captured.
 """
 import datetime, json, os, socket, subprocess, threading

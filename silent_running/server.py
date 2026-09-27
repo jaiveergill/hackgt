@@ -89,7 +89,7 @@ def run_decode(rois, duration, source="webcam", label=None, t_crop=0.0, expressi
         STATE["utt_id"] += 1
         uid = STATE["utt_id"]
         # live camera only by default: file playback and decode_file are replays of known clips (SR_CAPTURE=all: file playback too)
-        if capture and (source.split("-")[0] in ("webcam", "usb", "stream") or (os.environ.get("SR_CAPTURE") == "all" and source.startswith("file"))):
+        if capture and (source.split("-")[0] in ("webcam", "usb", "stream", "serial") or (os.environ.get("SR_CAPTURE") == "all" and source.startswith("file"))):
             capture.utterance(uid, rois, {"kind": source, **((camera.source_info or {}) if camera else {})})
         set_status("processing", utt_id=uid, stage="encode")
         try:
@@ -963,7 +963,7 @@ async def _startup():
 def main():
     global engine, camera, context, phrase_decoder, llm, confirm_loop, capture
     ap = argparse.ArgumentParser()
-    ap.add_argument("--source", default=None, help="video source: webcam[:N] | usb[:N|name] | file:path.mp4[?loop=0&realtime=0] (default: webcam auto-detect)")
+    ap.add_argument("--source", default=None, help="video source: webcam[:N] | usb[:N|name] | file:path.mp4[?loop=0&realtime=0] | stream:<ESP32 host>[?window=2x] | serial[?window=2x] (ESP32-CAM over USB) (default: webcam auto-detect)")
     ap.add_argument("--camera", type=int, default=-1, help="shorthand for --source webcam:N; -1 = auto-detect first live camera")
     ap.add_argument("--port", type=int, default=8000)
     ap.add_argument("--device", default="mps")

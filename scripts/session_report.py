@@ -50,7 +50,8 @@ def main():
         link = [c["source"] for c in cs if (c.get("source") or {}).get("mbps") is not None]
         if link:  # the stream's demand on the WiFi link; freezes start where the link's capacity drops below it
             print(f"  stream     median {st.median(l['mbps'] for l in link):.2f} Mbit/s, {st.median(l['frame_kb'] for l in link):.1f} KB/frame"
-                  f" at {link[-1].get('width')}x{link[-1].get('height')}   (max {max(l['mbps'] for l in link):.2f} Mbit/s)")
+                  f" at {link[-1].get('width')}x{link[-1].get('height')}   (max {max(l['mbps'] for l in link):.2f} Mbit/s)"
+                  f"   bad frames (bytes lost on the way): {link[-1].get('bad_frames', 0)}")
         mouth = [c["mouth_px"] for c in cs if c.get("mouth_px")]
         if mouth:  # the model's crop reads a mouth 45 px wide; below that it is upsampled (camera_proc.MouthPixels)
             print(f"  mouth      median {st.median(mouth):.0f} px wide   min {min(mouth)}   (windows under 45 px: {sum(m < 45 for m in mouth)}/{len(mouth)})")
