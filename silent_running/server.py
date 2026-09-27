@@ -608,6 +608,21 @@ def api_source(spec: str):
     return {"ok": True, "source": camera.source_info}
 
 
+@app.post("/api/zoom")
+def api_zoom(zoom: float):
+    """The ESP32-CAM's sensor zoom, live: 1 = the whole view, 2 = its centre half at 2x the pixels (sources.ov3660_window)."""
+    if camera is None or not camera.opened:
+        return JSONResponse({"error": "no camera"}, status_code=400)
+    try:
+        info = camera.set_zoom(zoom)
+    except (RuntimeError, queue.Empty) as e:
+        msg = str(e) or "the capture process did not answer"
+        broadcast({"type": "error", "message": f"zoom {zoom:g}x: {msg}"})
+        return JSONResponse({"error": msg, "source": camera.source_info}, status_code=400)
+    sessionlog.log("zoom", zoom=zoom, source=info)
+    return {"ok": True, "source": info}
+
+
 def _file_rois(path):
     """Video file -> (abs path, mouth crops, n_frames, crop seconds, fps), or a JSONResponse error."""
     p = path if os.path.isabs(path) else os.path.join(ROOT, path)
