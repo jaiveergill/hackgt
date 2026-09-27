@@ -1,4 +1,5 @@
-"""A fake ESP32-CAM (CameraWebServer sketch) on this Mac, for scripts/check_stream_window.py and scripts/bench_link.py.
+"""A fake ESP32-CAM on this Mac: the CameraWebServer sketch over HTTP (FakeBoard) and firmware/usb_cam over a pseudo-terminal
+(FakeSerialBoard), for scripts/check_stream_window.py, scripts/check_serial_source.py and scripts/bench_link.py.
 
 It serves /control (framesize, quality), /resolution (the sensor window, applied like esp32-camera's ov2640 set_window: SVGA
 mode reads the 1600x1200 array binned to 800x600, the window is cut from that and scaled to the output size; frame sizes use
@@ -8,11 +9,13 @@ previous send finishes (CAMERA_GRAB_LATEST). Its "sensor" sees a face (a TED fra
 link(t) -> Mbit/s makes every send block like a TCP socket on a WiFi link of that capacity (None: unlimited). JPEG quality
 is not modelled: frames are encoded at one fixed quality, so only sizes relative to each other are meaningful.
 """
-import os, threading, time, urllib.parse
+import os, sys, threading, time, urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import cv2
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, ROOT)
+from silent_running.sources import serial_header  # noqa: E402  (the same header firmware/usb_cam writes)
 SENSOR_FPS = 25.0
 JPEG_QUALITY = 60
 FRAMESIZES = {6: (320, 240), 9: (480, 320), 10: (640, 480)}  # esp32-camera sensor.h (current enum)
@@ -106,3 +109,72 @@ class FakeBoard:
         return self.httpd.server_address[1]
 
 
+
+
+class FakeSerialBoard:
+    """firmware/usb_cam on a pseudo-terminal (`port` is its path): boot noise, then "SRF" messages; commands applied to a
+    FakeBoard's sensor state. Output is paced to `baud` (the real cable's speed; a pty ignores the baud rate it is opened
+    with). drop_every=N loses the middle of every Nth frame, as a full buffer would; flip_every=N flips one bit inside it. firmware="wifi" is the CameraWebServer
+    sketch plugged in: boot and log text only, never a frame. reset() is a brownout: settings lost, boot noise, "ready"."""
+    BOOT = b"ets Jul 29 2019 12:21:46\r\nrst:0x1 (POWERON_RESET),boot:0x13 (SPI_FAST_FLASH_BOOT)\r\nload:0x3fff0030,len:1344\r\n"
+
+    def __init__(self, firmware="usb_cam", baud=1_500_000, drop_every=0, flip_every=0):
+        self.board, self.firmware, self.baud, self.drop_every, self.flip_every = FakeBoard(), firmware, baud, drop_every, flip_every
+        import tty
+        self.master, slave = os.openpty()
+        tty.setraw(slave)  # a UART has no line discipline: no echo of the board's output back to it, no line editing
+        self.port = os.ttyname(slave)
+        self.log, self.frames, self._reset = [], 0, False
+        threading.Thread(target=self._run, daemon=True).start()
+
+    def reset(self):
+        self._reset = True
+
+    def _write(self, data):
+        time.sleep(len(data) * 10 / self.baud)  # 8N1: 10 bits per byte
+        os.write(self.master, data)
+
+    def _msg(self, kind, payload):
+        self._write(serial_header(kind, payload) + payload)
+
+    def _command(self, line):
+        self.log.append(line)
+        words = line.split()
+        if words[:1] == ["set"] and len(words) == 3:
+            code = self.board.control("/control", {"var": words[1], "val": words[2]})
+        elif words[:1] == ["win"] and len(words) == 8:
+            code = self.board.control("/resolution", dict(zip(("sx", "offx", "offy", "tx", "ty", "ox", "oy"), words[1:])))
+        else:
+            code = 400
+        if code == 200:
+            self.board.stale = []  # firmware/usb_cam discards the frames buffered before the change, then answers "ok"
+        self._msg(b"T", (("ok " if code == 200 else "err ") + line).encode())
+
+    def _run(self):
+        import select
+        self._write(self.BOOT)
+        if self.firmware == "wifi":
+            while True:
+                self._write(b"WiFi connecting...\r\n"); time.sleep(0.5)
+        self._msg(b"T", b"ready")
+        pending = b""
+        while True:
+            t_frame = time.time()
+            if self._reset:
+                self._reset = False
+                self.board.reboot(); self._write(self.BOOT); self._msg(b"T", b"ready")
+            if select.select([self.master], [], [], 0)[0]:
+                pending += os.read(self.master, 1024)
+            while b"\n" in pending:
+                line, pending = pending.split(b"\n", 1)
+                self._command(line.decode().strip())
+            jpg = cv2.imencode(".jpg", self.board.next_frame(), [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])[1].tobytes()
+            self.frames += 1
+            if self.flip_every and self.frames % self.flip_every == 0:
+                bad = bytearray(jpg); bad[len(bad) // 2] ^= 0x10
+                self._write(serial_header(b"J", jpg) + bytes(bad))  # sent intact by the board, one bit flipped on the way
+            elif self.drop_every and self.frames % self.drop_every == 0:
+                self._write(serial_header(b"J", jpg) + jpg[:len(jpg) // 3])  # the rest of this frame is lost
+            else:
+                self._msg(b"J", jpg)
+            time.sleep(max(t_frame + 1 / SENSOR_FPS - time.time(), 0))

@@ -23,3 +23,5 @@ httpx==0.28.1
 # expressive delivery (prosody.py): wav I/O and time-stretch; pyrubberband is optional (needs the rubberband binary)
 soundfile==0.14.0
 audiotsm==0.1.2
+# ESP32-CAM over the USB cable (sources.SerialSource, firmware/usb_cam)
+pyserial==3.5

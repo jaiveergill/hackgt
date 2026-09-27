@@ -418,7 +418,7 @@ def _worker(conn, spec, width, height, preview_width, buffer_seconds):
 
 class CameraProcess:
     def __init__(self, source="webcam", width=640, height=480, buffer_seconds=20, preview_width=640):
-        """source: a spec string for silent_running.sources.make_source (webcam[:N] | usb[:N|name] | file:path.mp4)."""
+        """source: a spec string for silent_running.sources.make_source (webcam[:N] | usb[:N|name] | file:path.mp4 | stream:... | serial...)."""
         self._args = (source, width, height, preview_width, buffer_seconds)
         self.restarts = 0
         self.fatal = None
