@@ -6,7 +6,6 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <link rel="icon" href="data:,">
 <!-- web fonts load without blocking first paint; system fonts are used if the network is down -->
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" media="print" onload="this.media='all'">
 <script>
 // "/" re-reads index.html on every request, but /static files can be heuristically cached by the browser. Version them per
 // page load so markup and code always match after a git pull mid-demo.
@@ -15,13 +14,12 @@ const V=Date.now();document.write(`<link rel="stylesheet" href="/static/app.css?
 </head>
 <body>
 <header>
-  <div class="brand"><span class="mark"></span><h1>Silent <b>Running</b></h1></div>
-  <div class="sub">ICU silent-speech communicator · <span id="engine" class="mono"></span></div>
+  <div class="cell brand"><h1>Silent Running</h1><span class="sub">Bedside</span></div>
+  <div class="cell engine"><span class="label">Model</span><span id="engine" class="mono v"></span></div>
+  <div class="cell status"><span class="label">State</span><span class="statuspill idle" id="statuspill"><i></i><span>idle</span></span></div>
+  <div class="cell warm" id="warmup" hidden title="The voice-timing model is still loading; decodes can take several seconds until it finishes"><span class="label">Warming up</span><span class="v small">first reads are slower</span></div>
   <div class="spacer"></div>
-  <div class="warmup" id="warmup" hidden title="The voice-timing model is still loading; decodes can take several seconds until it finishes">warming up · first reads are slower</div>
-  <div class="statuspill idle" id="statuspill"><i></i><span>idle</span></div>
-  <div class="toggle tabs" id="tabs"><button data-tab="patient" class="on">Patient</button><button data-tab="board">Nurse board</button><button data-tab="dev">Dev</button></div>
-  <div class="toggle" id="mode"><button data-mode="phrase" class="on">Phrase</button><button data-mode="open">Open</button></div>
+  <nav class="tabs" id="tabs"><button data-tab="patient" class="on">Patient</button><button data-tab="board">Nurse board</button><button data-tab="dev">Dev</button></nav>
 </header>
 <main>
 <!-- ============================ PATIENT TAB ============================ -->
@@ -33,7 +31,7 @@ const V=Date.now();document.write(`<link rel="stylesheet" href="/static/app.css?
       <svg id="overlay" viewBox="0 0 640 480" preserveAspectRatio="xMidYMid meet"><g id="ovbox"></g></svg>
       <div class="badge"><div class="dot" id="dot"></div><span id="track">looking for face…</span></div>
       <div class="badge handsbadge" id="hands" hidden></div>
-      <div class="badge meter">face <span>angry <b><i id="m_angry"></i></b></span><span>warm <b><i id="m_warm"></i></b></span><span>sad <b><i id="m_sad"></i></b></span></div>
+      <div class="badge meter" hidden>face <span>angry <b><i id="m_angry"></i></b></span><span>warm <b><i id="m_warm"></i></b></span><span>sad <b><i id="m_sad"></i></b></span></div>
       <div class="state idle" id="state">idle</div>
       <div class="toggle zoom" id="zoom" hidden title="ESP32-CAM sensor zoom: 2x reads the centre half of the view at 2x the pixels across the mouth"><button data-z="1">1x</button><button data-z="2">2x</button></div>
       <button class="rotate" id="rotate" hidden title="Turn the camera image 90° clockwise (a camera mounted sideways on the glasses)">↻ 0°</button>
@@ -47,7 +45,7 @@ const V=Date.now();document.write(`<link rel="stylesheet" href="/static/app.css?
       <div class="sig" id="sig-hand"><label>Hand</label><div class="v"><span>—</span></div></div>
       <div class="sig pain" id="sig-pain"><label>Pain <em id="painval"></em></label><div class="painbar"><i id="painfill"></i></div></div>
     </div>
-    <button class="listen" id="listen">HOLD TO LISTEN<small>or hold the space bar · hands-free available in Dev</small></button>
+    <button class="listen" id="listen">Hold to listen<small>or hold the space bar · hands-free in Dev</small></button>
     <div class="panel slim">
       <h3>What is this about? <span class="h3sub">optional, helps disambiguate</span></h3>
       <div class="chips" id="chips"></div>
@@ -104,10 +102,6 @@ const V=Date.now();document.write(`<link rel="stylesheet" href="/static/app.css?
         <h3>Conversation</h3>
         <div class="logscroll" id="logscroll"><div class="log" id="log"><span class="small">Nothing yet. Nurse asks, patient mouths, laptop answers.</span></div></div>
       </div>
-      <div class="panel">
-        <h3>Candidates · tap to say <span class="legend"><i class="lv"></i>visual <i class="lc"></i>with context</span></h3>
-        <div class="dym" id="dym"><span class="small">Waiting for an utterance…</span></div>
-      </div>
     </div>
 
     <div class="latency panel slim">
@@ -132,10 +126,15 @@ const V=Date.now();document.write(`<link rel="stylesheet" href="/static/app.css?
       <div class="hist" id="hist"></div>
     </div>
     <div class="panel settings">
+      <label class="modelbl">decoding <span class="toggle" id="mode"><button data-mode="phrase" class="on">Phrase match</button><button data-mode="open">Open vocabulary</button></span></label>
       <label><input type="checkbox" id="autolisten"> hands-free (auto-detect mouth movement)</label>
       <label><input type="checkbox" id="llm" checked> LLM propose + visual verify (Open Mode)</label>
       <label>force emotion <select id="override"><option value="">from face</option><option>angry</option><option>warm</option><option>sad</option><option>surprised</option><option value="neutral">neutral</option></select></label>
       <details><summary>eval</summary><div class="row" style="margin-top:6px"><input class="txt" id="speaker" placeholder="speaker" style="width:120px"><button class="btn" id="save">Save last 6 s as sample of selected phrase</button></div></details>
+    </div>
+    <div class="panel">
+      <h3>Candidates · tap to say <span class="legend"><i class="lv"></i>visual <i class="lc"></i>with context</span></h3>
+      <div class="dym" id="dym"><span class="small">Waiting for an utterance…</span></div>
     </div>
     <div class="panel">
       <h3>Candidate phrases · visual likelihood → with context</h3>

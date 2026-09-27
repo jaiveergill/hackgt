@@ -62,7 +62,7 @@ function drawOverlay(m){
   if(!m.face||!m.bbox){g.innerHTML='';return;}
   const W=m.frame_w||640,H=m.frame_h||480;$('#overlay').setAttribute('viewBox',`0 0 ${W} ${H}`);
   let [x1,y1,x2,y2]=m.bbox;if(m.source&&m.source.mirror)[x1,x2]=[W-x2,W-x1];  // a mirrored preview (webcam): the bbox is not
-  const L=Math.min(x2-x1,y2-y1)*.28,c=m.listening||m.mouth_active?'#5aa9ff':'#3ddc97';
+  const L=Math.min(x2-x1,y2-y1)*.28,c=m.listening||m.mouth_active?'#7fb0ff':'#7fd6ad';
   const p=`M${x1},${y1+L}V${y1}H${x1+L}M${x2-L},${y1}H${x2}V${y1+L}M${x2},${y2-L}V${y2}H${x2-L}M${x1+L},${y2}H${x1}V${y2-L}`;
   g.innerHTML=`<path d="${p}" stroke="${c}" style="vector-effect:non-scaling-stroke;stroke-width:3.5"/><text class="lbl" x="${x1}" y="${y1-W/80}" fill="${c}" font-size="${W/42}">${m.listening?'READING LIPS':'MOUTH'}</text>`;
 }
@@ -88,7 +88,7 @@ function handle(m){
   logEvent(m);
   if(m.type==='hello'){setState(m.state.status);setWarm(m.state.warm);phrases=m.phrases;phraseTable=m.phrase_table||[];applyCtx(m.context);mode=m.state.mode;syncMode();if(m.state.expressive!=null)$('#expressive').checked=m.state.expressive;$('#pace').checked=!!m.state.pace;
     $('#nphr').textContent=phrases.length+' phrases';$('#phrlist').innerHTML=phrases.map(p=>`<span>${esc(p)}</span>`).join('');$('#phrasedl').innerHTML=phrases.map(p=>`<option value="${esc(p)}">`).join('');buildChips();$('#log').innerHTML=LOG_EMPTY;(m.log||[]).forEach(addLog);
-    if(!DEMO){if(!$('#cam').getAttribute('src'))$('#cam').src='/stream?session='+Date.now();fetch('/api/state').then(r=>r.json()).then(s=>{$('#engine').textContent=`${s.engine.model} · ${phrases.length} phrases`;});
+    if(!DEMO){if(!$('#cam').getAttribute('src'))$('#cam').src='/stream?session='+Date.now();fetch('/api/state').then(r=>r.json()).then(s=>{$('#engine').textContent=s.engine.model;});
       if($('#voice').value.startsWith('clone:'))fillBank($('#voice').value.slice(6));}}  // the voice may be listed before the phrases
   else if(m.type==='status'){setState(m.status,m.stage);if(m.status==='processing'&&m.stage==='crop')toast('');}
   else if(m.type==='raw'){$('#raw').innerHTML=`<span class="lbl">raw (CTC greedy)</span>${esc(m.text)||'<span class="small">(nothing)</span>'}`;$('#nbest').innerHTML='';$('#lat').textContent=`crop ${ms(m.latency.crop)} · encode ${ms(m.latency.encode)} · ${m.n_frames} frames (${m.duration.toFixed(1)} s)`;}
@@ -110,6 +110,7 @@ function handle(m){
   else if(m.type==='saved'){toast('saved '+m.file+' as "'+m.phrase+'"',true);}
 }
 function logEvent(m){
+  if(m.type==='feeds')return;  // the nurse board's 2 s camera-state push: it has its own log
   const E=$('#events'),d=document.createElement('div');const {type,...rest}=m;
   let s=JSON.stringify(rest);if(s.length>180)s=s.slice(0,180)+'…';
   d.className=type;d.innerHTML=`<b>${esc(type)}</b>${esc(s)}`;E.prepend(d);while(E.children.length>80)E.lastChild.remove();
@@ -294,7 +295,7 @@ function applyNonverbal(nv){
 
 // ---------- latency: server stages + decision + time to first audio
 const lat={uid:null,t:{},server:null};  // one utterance: only its own decision and first audio are counted
-const LAT_COLORS={crop:'#56677b',encode:'#5aa9ff',phrase:'#3ddc97',beam:'#3ddc97',read:'#5aa9ff',decide:'#b18cff',voice:'#ffb547'};  // read: what was left of a reading that ran during the hang
+const LAT_COLORS={crop:'#8f8f8f',encode:'#2b5fb3',phrase:'#1f8a5b',beam:'#1f8a5b',read:'#2b5fb3',decide:'#6b4fbb',voice:'#b26a00'};  // read: what was left of a reading that ran during the hang
 function latResult(m){lat.uid=m.utt_id;lat.t={result:performance.now()};lat.server=m.latency;renderLatency();}
 function latMark(uid,k){if(uid===lat.uid&&!lat.t[k]){lat.t[k]=performance.now();renderLatency();}}
 function renderLatency(){
@@ -306,8 +307,8 @@ function renderLatency(){
   const tot=segs.reduce((a,[,v])=>a+v,0),bar=$('#latbar'),span=Math.max(3,tot);  // the bar spans 3 s, or the whole total when slower
   bar.querySelector('.target').style.left=(2/span*100)+'%';
   bar.querySelectorAll('.seg').forEach(e=>e.remove());
-  segs.forEach(([k,v])=>{const e=document.createElement('div');e.className='seg';e.style.width=(v/span*100)+'%';e.style.background=LAT_COLORS[k]||'#8b9cb0';e.title=`${k} ${ms(v)}`;bar.insertBefore(e,bar.querySelector('.target'));});
-  $('#latlegend').innerHTML=segs.map(([k,v])=>`<span><i style="background:${LAT_COLORS[k]||'#8b9cb0'}"></i>${k} ${ms(v)}</span>`).join('')+(lat.t.audio?'':'<span>voice …</span>');
+  segs.forEach(([k,v])=>{const e=document.createElement('div');e.className='seg';e.style.width=(v/span*100)+'%';e.style.background=LAT_COLORS[k]||'#8f8f8f';e.title=`${k} ${ms(v)}`;bar.insertBefore(e,bar.querySelector('.target'));});
+  $('#latlegend').innerHTML=segs.map(([k,v])=>`<span><i style="background:${LAT_COLORS[k]||'#8f8f8f'}"></i>${k} ${ms(v)}</span>`).join('')+(lat.t.audio?'':'<span>voice …</span>');
   const T=$('#lattotal');T.textContent=`${tot.toFixed(2)} s${lat.t.audio?'':' +'}`;T.className='lattotal '+(tot<2?'ok':'slow');
 }
 
@@ -321,11 +322,11 @@ function renderDelivery(m){
   const st=$('#strip');st.innerHTML='';
   if(tm&&tm.words.length){const t0=tm.words[0].start,T=Math.max(tm.words[tm.words.length-1].end-t0,0.1);
     st.innerHTML=`<div class="lbl">mouthed (video)</div><div class="row2" id="rowv"></div><div class="lbl">delivered (audio)</div><div class="row2" id="rowa"></div>`;
-    const rv=$('#rowv');tm.words.forEach((w,i)=>{const e=document.createElement('span');e.style.left=((w.start-t0)/T*100)+'%';e.style.width=((w.end-w.start)/T*100)+'%';e.style.background=i%2?'#3ddc97':'#7fe7b3';e.textContent=w.word;rv.appendChild(e);});}
+    const rv=$('#rowv');tm.words.forEach((w,i)=>{const e=document.createElement('span');e.style.left=((w.start-t0)/T*100)+'%';e.style.width=((w.end-w.start)/T*100)+'%';e.style.background=i%2?'#1f8a5b':'#4fb08a';e.textContent=w.word;rv.appendChild(e);});}
   const rp=$('#replay');rp.innerHTML='<span class="small" style="line-height:28px">replay as:</span>';
   [['neutral',0],['angry',0.9],['warm',0.9],['sad',0.8]].forEach(([e,i])=>{const b=document.createElement('button');b.textContent=e;b.onclick=()=>speak(m.selected,{emotion:e,intensity:i,utt_id:m.utt_id});rp.appendChild(b);});
 }
-function renderAudioStrip(rep){const ra=$('#rowa');if(!ra||!rep||!rep.audio_words||!rep.audio_words.length)return;const aw=rep.audio_words,t0=aw[0].start,T=Math.max(aw[aw.length-1].end-t0,0.1);ra.innerHTML='';aw.forEach((w,i)=>{const e=document.createElement('span');e.style.left=((w.start-t0)/T*100)+'%';e.style.width=((w.end-w.start)/T*100)+'%';e.style.background=i%2?'#5aa9ff':'#8fc4ff';e.textContent=w.word+(rep.ratios&&Math.abs(rep.ratios[i]-1)>0.05?` ×${rep.ratios[i]}`:'');ra.appendChild(e);});}
+function renderAudioStrip(rep){const ra=$('#rowa');if(!ra||!rep||!rep.audio_words||!rep.audio_words.length)return;const aw=rep.audio_words,t0=aw[0].start,T=Math.max(aw[aw.length-1].end-t0,0.1);ra.innerHTML='';aw.forEach((w,i)=>{const e=document.createElement('span');e.style.left=((w.start-t0)/T*100)+'%';e.style.width=((w.end-w.start)/T*100)+'%';e.style.background=i%2?'#2b5fb3':'#6a8fd0';e.textContent=w.word+(rep.ratios&&Math.abs(rep.ratios[i]-1)>0.05?` ×${rep.ratios[i]}`:'');ra.appendChild(e);});}
 function renderNbest(nb,intoCands){
   if(!nb)return;
   if(intoCands){const cd=$('#cands');cd.innerHTML='';const mx=Math.max(...nb.map(h=>h.prob)),uid=last.utt_id;
