@@ -9,6 +9,7 @@ Wear the glasses and look at a face (or a photo of one) at the nurse's distance 
     python scripts/bench_link.py 172.20.10.2                        # current / window=2x / window=2x + quality=20
     python scripts/bench_link.py 192.168.4.1 --seconds 30 --rounds 3
     python scripts/bench_link.py 172.20.10.2 --configs "quality=16" "quality=20"
+    python scripts/bench_link.py serial                             # the same settings over the USB cable (firmware/usb_cam)
     python scripts/bench_link.py --fake    # SIMULATION: checks this script against scripts/fake_esp32.py, not the real link
 """
 import argparse, os, re, subprocess, sys, threading, time
@@ -54,12 +55,12 @@ def run(spec, seconds, board, fl, mp, clock):
                     mouth.append(mp(lm))
     finally:
         src.release()
-    return ts, kb, mouth
+    return ts, kb, mouth, src.bad_frames
 
 
 def summary(runs, seconds, pings):
     ts_all, kb, mouth, iv = [], [], [], []
-    for ts, k, m in runs:
+    for ts, k, m, _ in runs:
         kb += k; mouth += m; ts_all.append(len(ts))
         iv += list(np.diff(ts))
     iv = np.array(iv) if iv else np.array([seconds])
@@ -72,14 +73,14 @@ def summary(runs, seconds, pings):
             "frozen": f"{gaps.sum() / total:.0%}", "KB/frame": f"{np.median(kb):.1f}" if kb else "-",
             "Mbit/s": f"{np.mean(kb) * 8 * 1024 * fps / 1e6:.2f}" if kb else "-",
             "ping p50/p95": f"{np.percentile(rtt, 50):.0f}/{np.percentile(rtt, 95):.0f} ms" if rtt else "-",
-            "ping lost": f"{lost}/{len(pings)}" if pings else "-",
+            "ping lost": f"{lost}/{len(pings)}" if pings else "-", "bad frames": str(sum(b for *_, b in runs)),
             "mouth px": f"{np.median(mouth):.0f}" if mouth else "no face"}
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("host", nargs="?", default="172.20.10.2")
-    ap.add_argument("--configs", nargs="+", default=CONFIGS, help="query strings for stream:<host>?<config>")
+    ap.add_argument("--configs", nargs="+", default=CONFIGS, help="query strings for stream:<host>?<config> (or <serial spec>&<config>)")
     ap.add_argument("--seconds", type=float, default=20)
     ap.add_argument("--rounds", type=int, default=2)
     ap.add_argument("--fake", action="store_true", help="SIMULATION against scripts/fake_esp32.py (checks this script, not the link)")
@@ -99,9 +100,10 @@ def main():
     pings = {c: [] for c in a.configs}
     for r in range(a.rounds):
         for c in a.configs:
-            spec = f"stream:http://{host}/stream?{c}" if a.fake else f"stream:{host}?{c}"
+            serial = host.startswith("serial")
+            spec = f"stream:http://{host}/stream?{c}" if a.fake else (f"{host}{'&' if '?' in host else '?'}{c}" if serial else f"stream:{host}?{c}")
             stop, got = threading.Event(), []
-            if not a.fake:
+            if not a.fake and not serial:  # no network to ping over the cable
                 threading.Thread(target=pinger, args=(host, stop, got), daemon=True).start()
             print(f"round {r + 1}/{a.rounds}  {c} ...", flush=True)
             try:

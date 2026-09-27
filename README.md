@@ -25,6 +25,27 @@ python -m silent_running.server            # http://127.0.0.1:8000
 Open Mode's LLM uses the OpenAI API (`gpt-4o-mini`); put `OPENAI_API_KEY=...` in `.env`. It never runs on the primary Phrase Mode path.
 Voice output: browser voices by default; with `ELEVEN_LABS_API_KEY` in `.env` the UI lists ElevenLabs stock voices (`--voice Bella`), and cloned voices once the account tier allows Instant Voice Cloning (see `plans/PLAN_3_VOICE_CLONING.md`).
 
+## ESP32-CAM glasses: use the USB cable, not WiFi
+
+Over WiFi the board's PCB antenna sits against the wearer's head: the link's capacity drops below what the stream needs,
+TCP stalls on lost packets and the picture freezes for seconds. If the board is wired to the laptop anyway (ESP32-CAM-MB USB
+board), send the frames down the cable: no radio, nothing to shadow.
+
+1. Flash `firmware/usb_cam/usb_cam.ino` once (it replaces the WiFi sketch; WiFi stays off). Arduino IDE: board package
+   "esp32" by Espressif, board "AI Thinker ESP32-CAM", the `/dev/cu.usbserial-*` port, Upload. Or:
+   `arduino-cli compile --fqbn esp32:esp32:esp32cam firmware/usb_cam && arduino-cli upload -p /dev/cu.usbserial-XXXX --fqbn esp32:esp32:esp32cam firmware/usb_cam`
+   (if the upload can't connect, hold IO0 and tap RST on the board).
+2. Run `python -m silent_running.server --source serial` (the one USB-serial port; or `serial:/dev/cu.usbserial-XXXX`).
+
+Measured on the board (ESP32-CAM-MB on macOS, `scripts/bench_link.py serial`): 20-27 fps with no freezes at all (longest
+gap 0.05-0.11 s over 4 x 15 s runs; WiFi logs showed 1-3.4 s freezes), 5-7 KB per HVGA frame depending on the scene. The
+cable carries ~150 KB/s at 1.5 Mbaud, so bigger frames lower the frame rate instead of freezing it. 2 Mbaud lost a byte in
+60% of frames, 1.5 Mbaud 2%, 1 Mbaud 1%: a damaged frame is dropped by its CRC-32, never read smeared.
+Not working on the board yet: the sensor zoom (`window=`). Root cause (found by the kuala-lumpur session): this board's
+camera is an OV3660 (PID 0x3660 at 0x3C), not an OV2640, and `window=` computes OV2640 `set_res_raw` arguments. On the
+OV3660 those arguments are its array window and timing registers, so the call gives an empty window and capture stalls
+(0.6 fps, "frame capture failed"). The OV3660 values for a centred 2x (2x the pixels across the mouth) streamed at 30.7 fps
+in a debug build; the per-sensor window and a live zoom toggle are a follow-up. The WiFi `window=` path has the same bug.
 ## Session logs (read these when something lagged)
 
 Every server start writes `logs/session_<timestamp>.jsonl` (`logs/latest.jsonl` points at the newest). It records, every 5 s,
@@ -92,7 +113,8 @@ python scripts/captures.py rescore    # re-read every labelled clip with this ch
 * Watch **mouth N/45 px** on the camera badge: the mouth's width in camera pixels vs the 45 px the model's crop reads.
   Amber (under 45) means the crop is upsampled, i.e. blurred: move closer or zoom in. Half the pixels cut Phrase Mode
   top-1 from 64% to 38% on MIRACL clips. Each result, the session log and the capture log record it too.
-* ESP32-CAM zoom: `--source stream:172.20.10.2?window=2x` makes the sensor read only the centre half of its view, sent
+* ESP32-CAM zoom (not working on the board yet: see "ESP32-CAM glasses" above): `--source stream:172.20.10.2?window=2x`
+  would make the sensor read only the centre half of its view, sent
   pixel for pixel: 1.67x the pixels across the mouth over the same WiFi link (same sensor mode and clock as HVGA, so the
   frame rate should hold: not yet measured on the board). That is the most detail the sensor gives at this frame rate;
   the zoom only sets how much of the view is kept, from just over 1.67x (widest, 464x312) to 2x (400x264). The server
