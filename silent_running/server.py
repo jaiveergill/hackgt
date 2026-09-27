@@ -27,6 +27,7 @@ from silent_running import confirm as confirm_mod
 from silent_running import captures
 from silent_running.unit import Unit
 from silent_running.ambient import AmbientCamera
+from silent_running.ascend import AscendBridge
 
 STATIC = os.path.join(ROOT, "silent_running", "static")
 app = FastAPI(title="Silent Running")
@@ -45,7 +46,7 @@ STATE = {"mode": "phrase", "auto_listen": False, "voice": None, "expressive": Tr
 clients = set()
 loop = None
 engine = camera = context = phrase_decoder = llm = confirm_loop = capture = None
-unit = ambient = None  # the charge nurse's unit (silent_running/unit.py) and the laptop's ambient camera (ambient.py)
+unit = ambient = ascend = None  # the charge nurse's unit (silent_running/unit.py) and the laptop's ambient camera (ambient.py)
 phrases = load_phrases()            # the curated inventory: what the UI lists and the voice bank pre-synthesizes
 PHRASE_TABLE = load_phrase_table()
 BANK_TABLE = load_phrase_table(BANK_PATH) if os.path.exists(BANK_PATH) else []   # generated ICU utterance bank: extra decoder candidates
@@ -627,6 +628,36 @@ def api_unit_ack(alert: int, by: str = "charge nurse"):
     except KeyError as e:
         return JSONResponse({"error": str(e)}, status_code=404)
     return {"ok": True, "alert": a, "metrics": unit.metrics()}
+
+
+@app.get("/api/ascend")
+def api_ascend():
+    """What the board handed to Impiricus Ascend today (Spark triggers) and what came back (engagements). Simulated: no public API."""
+    if ascend is None:
+        return JSONResponse({"error": "no ascend bridge"}, status_code=404)
+    return ascend.snapshot()
+
+
+@app.get("/api/ascend/bed")
+def api_ascend_bed(bed: str):
+    """The Ascend resource and ION-style next best action for one bed's detail view."""
+    if unit is None or ascend is None or bed not in unit.beds:
+        return JSONResponse({"error": f"no bed {bed}"}, status_code=404)
+    with unit.lock:
+        v = unit.bed_view(bed, transcript=True)
+    return {"resource": ascend.resource_for(v), "next_best_action": ascend.next_best_action(v)}
+
+
+@app.post("/api/ascend/engage")
+def api_ascend_engage(bed: str, action: str, resource: str = None, by: str = "charge nurse"):
+    """The nurse opened a resource, asked a medical science liaison, or sent a Wallet card: the engagement Impiricus measures."""
+    if ascend is None or action not in ("opened", "msl", "wallet"):
+        return JSONResponse({"error": "bad action"}, status_code=400)
+    rec = ascend.engaged(action, bed, resource=resource, by=by)
+    if unit and bed in unit.beds:  # documented on the bed like any other line at the bedside
+        note = {"opened": f"Opened Ascend resource: {resource}", "msl": f"Asked a medical science liaison about: {resource}", "wallet": f"Sent Wallet card: {resource}"}[action]
+        unit.nurse_said(bed, note, by=by)
+    return {"ok": True, "event": rec, "summary": ascend.summary()}
 
 
 @app.post("/api/unit/nurse")
@@ -1256,7 +1287,7 @@ async def _startup():
 
 
 def main():
-    global engine, camera, context, phrase_decoder, llm, confirm_loop, capture, unit, ambient
+    global engine, camera, context, phrase_decoder, llm, confirm_loop, capture, unit, ambient, ascend
     ap = argparse.ArgumentParser()
     ap.add_argument("--source", default=None, help="video source: webcam[:N] | usb[:N|name] | file:path.mp4[?loop=0&realtime=0] | stream:<ESP32 host>[?window=2x] | serial[?window=2x] (ESP32-CAM over USB) (default: webcam auto-detect)")
     ap.add_argument("--camera", type=int, default=-1, help="shorthand for --source webcam:N; -1 = auto-detect first live camera")
@@ -1275,6 +1306,7 @@ def main():
     ap.add_argument("--ambient", default="auto", help="ambient overview camera for the dashboard: auto (the first laptop camera that delivers frames), an index, or none")
     ap.add_argument("--bed", default=os.environ.get("SR_BED", "4"), help="the live patient's bed number on the dashboard")
     ap.add_argument("--initials", default=os.environ.get("SR_INITIALS", "J.G."), help="the live patient's initials on the dashboard")
+    ap.add_argument("--ascend-webhook", default=os.environ.get("ASCEND_WEBHOOK", ""), help="POST Spark triggers here (an Impiricus endpoint, if one ever exists); empty = simulated delivery")
     ap.add_argument("--no-simulate", action="store_true", help="dashboard: no simulated beds' activity")
     ap.add_argument("--confirm-timeout", type=float, default=confirm_mod.TIMEOUT, help="seconds to wait for a nod/shake after 'Sounds like: X?'")
     args = ap.parse_args()
@@ -1310,7 +1342,14 @@ def main():
                                        "model_dir": STATE["model_dir"], "profile": args.profile, "n_phrases": len(phrases),
                                        "scoring": {k: v for k, v in os.environ.items() if k.startswith("SR_")}})
         print(f"[capture] logging live utterances to {os.path.relpath(capture.path, ROOT)}")
-    unit = Unit(real_bed=args.bed, real_initials=args.initials, emit=broadcast, simulate=not args.no_simulate)
+    ascend = AscendBridge(emit=broadcast, webhook=args.ascend_webhook or None)
+    def _unit_emit(m):  # every unit event reaches the board, and the Impiricus seam sees it too
+        broadcast(m)
+        try:
+            ascend.on_unit_event(m)
+        except Exception as e:
+            print("[ascend]", repr(e))
+    unit = Unit(real_bed=args.bed, real_initials=args.initials, emit=_unit_emit, simulate=not args.no_simulate)
     print(f"[unit] {len(unit.beds)} beds (live: bed {unit.real_bed}), {len(unit.alerts)} alerts on file for today")
     if args.ambient != "none":
         ambient = AmbientCamera(index=None if args.ambient == "auto" else int(args.ambient))

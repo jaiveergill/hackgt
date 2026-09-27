@@ -19,6 +19,7 @@
     <div class="m" id="m-open"><dt>Open requests</dt><dd>–</dd></div>
     <div class="m" id="m-resp"><dt>Average response</dt><dd>–</dd></div>
     <div class="m" id="m-perbed"><dt>Requests per bed today</dt><dd>–</dd></div>
+    <div class="m" id="m-ascend"><dt>Ascend engagements</dt><dd>–</dd></div>
   </dl>
   <div class="clock" id="clock"></div>
 </header>
@@ -30,6 +31,15 @@
       <p class="note" id="boardnote">Bed 4 is the live camera. The other six beds are simulated so the unit looks like a unit.</p>
     </div>
     <div class="tiles" id="tiles"></div>
+    <div class="ascend" id="ascend">
+      <div class="ascendhead">
+        <h2>Impiricus Ascend journey</h2>
+        <span class="sim">Simulated · Impiricus has no public API · not affiliated</span>
+      </div>
+      <p class="note">Every request on this board is a real-world event. It goes to Spark as a de-identified trigger (unit, bed, category, urgency, time to acknowledge). Ascend hands the nurse one resource back on the bed's page. What the nurse does with it is the engagement.</p>
+      <div class="ascendsum" id="ascendsum"></div>
+      <table class="journey"><thead><tr><th>Time</th><th>Direction</th><th>Event</th><th>Bed</th><th>Detail</th><th>Status</th></tr></thead><tbody id="journey"></tbody></table>
+    </div>
   </section>
 
   <section class="detail" id="detail" hidden>
@@ -53,6 +63,18 @@
           <div class="camlabel">Ambient overview · laptop camera</div>
         </div>
       </div>
+      <div class="rightcol">
+      <div class="guidance" id="guidance" hidden>
+          <div class="ghead"><span class="gkind" id="g-kind"></span><span class="sim">Impiricus Ascend · simulated</span></div>
+          <h3 id="g-title"></h3>
+          <p id="g-body"></p>
+          <p class="greason" id="g-reason"></p>
+          <div class="gactions">
+            <button class="primary" id="g-cta"></button>
+            <button id="g-msl">Ask a medical science liaison</button>
+          </div>
+          <div class="nba" id="nba" hidden><b>ION next best action</b><span id="nba-text"></span></div>
+        </div>
       <div class="transcript">
         <div class="thead">
           <h3>Today at the bedside</h3>
@@ -63,6 +85,7 @@
           <input id="noteinput" type="text" placeholder="Add a note to this bed's record" autocomplete="off">
           <button type="submit">Add note</button>
         </form>
+      </div>
       </div>
     </div>
   </section>

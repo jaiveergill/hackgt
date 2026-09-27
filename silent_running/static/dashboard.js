@@ -6,6 +6,7 @@ const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt
 const LEVEL_WORD = {calm: 'Calm', request: 'Request', urgent: 'Urgent'};
 
 let U = {beds: [], alerts: [], metrics: {}, real_bed: null, ambient: null};
+let A = {summary: {}, events: []};   // the Impiricus Ascend seam (simulated)
 let bedsById = {};
 let openBed = null;        // bed id shown in detail, or null
 let detailLines = [];      // transcript of the open bed
@@ -37,6 +38,7 @@ async function load() {
   U = await r.json();
   skew = U.now - Date.now() / 1000;
   index();
+  try { A = await (await fetch('/api/ascend')).json(); } catch (e) {}
   renderAll();
   if (openBed) await openDetail(openBed, true);
 }
@@ -56,11 +58,43 @@ function applyEvent(m) {
   if (openBed === m.bed.bed) {
     if (m.line) { detailLines.push(m.line); renderLines(); }
     renderDetailHead();
+    if (m.event === 'patient' || m.event === 'ack') loadGuidance(openBed);   // a new request may change the resource
   }
 }
 
 // ---------------------------------------------------------------- render
-function renderAll() { renderMetrics(); renderTiles(); renderAlerts(); }
+function renderAll() { renderMetrics(); renderTiles(); renderAlerts(); renderAscend(); }
+
+function applyAscend(m) {
+  const j = A.events.findIndex(e => e.id === m.event.id);
+  if (j >= 0) A.events[j] = m.event; else A.events.push(m.event);
+  A.events = A.events.slice(-60);
+  A.summary = m.summary;
+  renderAscend(); renderMetrics();
+}
+const EVENT_WORD = {'spark.trigger': 'Spark trigger', 'engagement.opened': 'Resource opened', 'engagement.msl': 'MSL asked', 'engagement.wallet': 'Wallet card sent'};
+function eventDetail(e) {
+  const p = e.payload || {};
+  if (e.kind === 'spark.trigger') return p.trigger === 'bedside_request'
+    ? `${p.trigger} · ${p.category || '–'} · ${p.urgency}`
+    : `${p.trigger} · ${dur(p.time_to_acknowledge_s || 0)} to acknowledge`;
+  return p.resource || '';
+}
+function renderAscend() {
+  const s = A.summary || {};
+  $('#ascendsum').innerHTML = [
+    `<span><b>${s.triggers ?? 0}</b>Spark triggers sent today</span>`,
+    `<span><b>${s.resources_opened ?? 0}</b>resources opened</span>`,
+    `<span><b>${s.msl_asks ?? 0}</b>MSL asks</span>`,
+    `<span><b>${s.wallet_sent ?? 0}</b>Wallet cards sent</span>`,
+    `<span>${esc(s.delivery || '')}</span>`].join('');
+  const rows = [...A.events].sort((x, y) => y.ts - x.ts).slice(0, 10);
+  $('#journey').innerHTML = rows.length ? rows.map(e => `<tr class="${e.direction}">
+      <td>${clockS(e.ts)}</td><td class="dir">${e.direction === 'out' ? 'Board → Ascend' : 'Nurse → Ascend'}</td>
+      <td class="ev">${EVENT_WORD[e.kind] || esc(e.kind)}</td><td>${e.bed ? 'Bed ' + esc(e.bed) : ''}</td>
+      <td class="detail">${esc(eventDetail(e))}</td><td class="st">${esc(e.status)}</td></tr>`).join('')
+    : `<tr><td colspan="6" class="none">No requests yet today. The first request becomes the first Spark trigger.</td></tr>`;
+}
 
 function renderMetrics() {
   const m = U.metrics || {};
@@ -69,6 +103,9 @@ function renderMetrics() {
   open.classList.toggle('hot', !!m.open_urgent);
   $('#m-resp dd').textContent = m.avg_response_s == null ? '–' : dur(m.avg_response_s);
   $('#m-perbed dd').innerHTML = m.requests_per_bed == null ? '–' : `${m.requests_per_bed.toFixed(1)}<small>${m.requests_today} across ${m.beds} beds</small>`;
+  const s = A.summary || {};
+  const eng = (s.resources_opened || 0) + (s.msl_asks || 0) + (s.wallet_sent || 0);
+  $('#m-ascend dd').innerHTML = `${eng}<small>${s.triggers || 0} triggers</small>`;
   const live = U.beds.find(b => b.real);
   const sim = U.beds.length - (live ? 1 : 0);
   $('#boardnote').textContent = live
@@ -156,12 +193,38 @@ async function openDetail(bed, silent) {
   $('#board').hidden = true; $('#detail').hidden = false;
   const real = !!v.real;
   $('#d-img').src = real ? '/stream' : '';
+  $('#d-img').hidden = !real;
   $('#d-nocam').hidden = real;
   $('#d-camlabel').textContent = real ? 'Glasses camera · live' : '';
   const a = U.ambient;
   $('#d-ambient').hidden = !(a && a.opened);
   if (a && a.opened) $('#d-amb').src = '/ambient';
   renderDetailHead(); renderLines();
+  loadGuidance(bed);
+}
+async function loadGuidance(bed) {
+  const g = $('#guidance');
+  let d;
+  try { d = await (await fetch(`/api/ascend/bed?bed=${encodeURIComponent(bed)}`)).json(); } catch (e) { g.hidden = true; return; }
+  const r = d.resource;
+  if (!r) { g.hidden = true; return; }
+  g.hidden = false;
+  g.dataset.resource = r.title; g.dataset.kind = r.kind;
+  $('#g-kind').textContent = r.kind;
+  $('#g-title').textContent = r.title;
+  $('#g-body').textContent = r.body;
+  $('#g-reason').textContent = `Why this: ${r.reason}`;
+  const cta = $('#g-cta'); cta.textContent = r.cta; cta.className = 'primary'; cta.disabled = false;
+  const msl = $('#g-msl'); msl.textContent = 'Ask a medical science liaison'; msl.className = ''; msl.disabled = false;
+  const n = d.next_best_action;
+  $('#nba').hidden = !n;
+  if (n) $('#nba-text').textContent = n.text;
+}
+async function engage(action, btn, doneText) {
+  const g = $('#guidance');
+  btn.disabled = true;
+  const r = await fetch(`/api/ascend/engage?bed=${encodeURIComponent(openBed)}&action=${action}&resource=${encodeURIComponent(g.dataset.resource)}`, {method: 'POST'});
+  if (r.ok) { btn.textContent = doneText; btn.classList.add('done'); } else btn.disabled = false;
 }
 function closeDetail() {
   openBed = null; detailLines = [];
@@ -195,7 +258,9 @@ document.addEventListener('click', async e => {
   }
   const tile = e.target.closest('.tile[data-bed]');
   if (tile) { openDetail(tile.dataset.bed); return; }
-  if (e.target.closest('#back')) { e.preventDefault(); closeDetail(); }
+  if (e.target.closest('#back')) { e.preventDefault(); closeDetail(); return; }
+  if (e.target.closest('#g-cta')) { const g = $('#guidance'); engage(g.dataset.kind === 'Wallet card' ? 'wallet' : 'opened', e.target, g.dataset.kind === 'Wallet card' ? 'Wallet card sent' : 'Opened'); return; }
+  if (e.target.closest('#g-msl')) { engage('msl', e.target, 'Asked · MSL will follow up'); }
 });
 $('#noteform').addEventListener('submit', async e => {
   e.preventDefault();
@@ -209,7 +274,7 @@ $('#noteform').addEventListener('submit', async e => {
 function connect() {
   const ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`);
   ws.onopen = () => { $('#conn').className = 'live on'; $('#conn').lastChild.nodeValue = 'live'; load().catch(console.error); };
-  ws.onmessage = ev => { const m = JSON.parse(ev.data); if (m.type === 'unit') applyEvent(m); };
+  ws.onmessage = ev => { const m = JSON.parse(ev.data); if (m.type === 'unit') applyEvent(m); else if (m.type === 'ascend') applyAscend(m); };
   ws.onclose = () => { $('#conn').className = 'live off'; $('#conn').lastChild.nodeValue = 'reconnecting'; setTimeout(connect, 1500); };
 }
 const h = location.hash.match(/bed=([^&]+)/);

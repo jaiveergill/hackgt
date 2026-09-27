@@ -68,6 +68,23 @@ the bedside conversation documents itself.
 * Everything the board shows is appended to `data/unit/<date>.jsonl` and replayed at startup, so "today" survives a restart.
   Delete the day's file to start the demo clean. `GET /api/unit` is the snapshot; `POST /api/unit/ack?alert=N` acknowledges.
 
+### The Impiricus layer (HackGT 13 "Invent the next way we engage HCPs")
+
+Impiricus has no public API, so the Impiricus side is **simulated and labelled so on every screen**; the shapes follow their own
+products (`silent_running/ascend.py`):
+
+* **Spark trigger out.** Spark runs engagement journeys off real-world events. Every request on the board becomes a de-identified
+  `bedside_request` trigger (unit, bed, category, urgency; then `bedside_request_acknowledged` with the time to acknowledge).
+  `--ascend-webhook URL` POSTs them for real; without it they are journaled as simulated. `GET /api/ascend` is the journey.
+* **Ascend resource in.** On a bed's detail the nurse gets one Ascend-style resource for the open request's category (treatment
+  information, dosing calculator, patient resource, or a Wallet card to forward to the family), medical-affairs material only,
+  never in the alert path. Opening it, asking a medical science liaison, or sending the Wallet card is the engagement
+  (`POST /api/ascend/engage`), journaled and documented on the bed. The top bar counts engagements.
+* **ION next best action.** A transparent rule over today's requests at the bed (most frequent category, at least twice).
+
+The pitch: Impiricus reaches the prescriber (DocUpdate is prescriber-only, outpatient). The board reaches the bedside care team
+at the moment the patient asks, and hands Impiricus the event that started it.
+
 ## Session logs (read these when something lagged)
 
 Every server start writes `logs/session_<timestamp>.jsonl` (`logs/latest.jsonl` points at the newest). It records, every 5 s,
