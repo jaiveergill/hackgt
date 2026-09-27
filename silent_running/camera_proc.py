@@ -22,7 +22,7 @@ class MouthPixels:
     """How wide the mouth is in camera pixels, measured the way the crop sees it. The crop fits the face to Chaplin's
     reference face (a similarity transform on eyes, nose tip and mouth centre, VideoProcess.affine_transform) and cuts
     the model's 96x96 input there, where the mouth is 45 px wide (`need`). A smaller mouth is upsampled into the crop,
-    i.e. blurred; measured on MIRACL clips, half the pixels cut Phrase Mode top-1 from 64% to 38%."""
+    i.e. blurred; measured on MIRACL clips, half the pixels cut phrase top-1 from 64% to 38%."""
     def __init__(self, vp):
         self.vp = vp
         self.ref = vp.get_stable_reference(vp.reference, (256, 256), (256, 256))

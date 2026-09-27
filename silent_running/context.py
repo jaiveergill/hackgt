@@ -29,14 +29,14 @@ class ContextStore:
 
 
 # LLM providers, all through the OpenAI-compatible chat API: (key variable, base URL, default model). Grok default: the fastest
-# of the account's models on this task (1.5-1.9 s per call; grok-4.3 took 4.7-11.5 s, grok-4.7 8.8-10.4 s), and Open Mode
+# of the account's models on this task (1.5-1.9 s per call; grok-4.3 took 4.7-11.5 s, grok-4.7 8.8-10.4 s), and the app
 # speaks only after the verdict, so this latency is added to every sentence.
 LLM_PROVIDERS = {"grok": ("XAI_API_KEY", "https://api.x.ai/v1", "grok-4.20-0309-non-reasoning"),
                  "openai": ("OPENAI_API_KEY", None, "gpt-4o-mini")}
 
 
 class LLMInterpreter:
-    """Open Mode's interpreter (server._bg_llm): proposes what the patient meant; the visual model verifies each proposal.
+    """The interpreter (server._bg_llm): proposes what the patient meant; the visual model verifies each proposal.
     provider: grok (XAI_API_KEY) | openai (OPENAI_API_KEY), read from the environment / project .env."""
     def __init__(self, provider="grok", model=None, timeout=4.0):
         from dotenv import load_dotenv
@@ -47,7 +47,7 @@ class LLMInterpreter:
         self.client = None
         if self.key:
             from openai import OpenAI
-            # One attempt, bounded: Open Mode speaks after the verdict, and a hung call used to take 60 s (20 s x 3 attempts)
+            # One attempt, bounded: the app speaks after the verdict, and a hung call used to take 60 s (20 s x 3 attempts)
             # before the raw reading was spoken. The default model answers in 1.3-1.7 s.
             self.client = OpenAI(api_key=self.key, base_url=base_url, timeout=timeout, max_retries=0)
 
