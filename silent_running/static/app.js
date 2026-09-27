@@ -434,7 +434,8 @@ $('#lblsave').onclick=()=>sendLabel($('#lbltext').value);
 $('#lbltext').addEventListener('keydown',e=>{if(e.key==='Enter')sendLabel($('#lbltext').value);});
 
 // ---------- tabs / mode / settings / context
-$$('#tabs button').forEach(b=>b.onclick=()=>{$$('#tabs button').forEach(x=>x.classList.toggle('on',x===b));$$('.tab').forEach(t=>t.classList.toggle('on',t.id==='tab-'+b.dataset.tab));});
+$$('#tabs button').forEach(b=>b.onclick=()=>{$$('#tabs button').forEach(x=>x.classList.toggle('on',x===b));$$('.tab').forEach(t=>t.classList.toggle('on',t.id==='tab-'+b.dataset.tab));
+  const f=$('#boardframe');if(b.dataset.tab==='board'&&f&&!f.src)f.src=f.dataset.src;});  // the board opens its own camera streams: only once it is looked at
 $$('#mode button').forEach(b=>b.onclick=()=>{mode=b.dataset.mode;send({cmd:'mode',mode});syncMode();});
 $('#expressive').onchange=e=>send({cmd:'settings',expressive:e.target.checked});
 $('#llm').onchange=e=>send({cmd:'settings',llm_enabled:e.target.checked});

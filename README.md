@@ -53,7 +53,7 @@ The server runs at lower priority with `--source serial` so the driver wins; the
 own driver made it worse (24% damaged). A CP2102/FTDI adapter (hundreds of bytes of buffer) would remove it at the source.
 ## Charge nurse unit board (`/dashboard`)
 
-The provider side: `http://127.0.0.1:8000/dashboard` (also the **Unit board** link in the bedside UI header). One tile per bed
+The provider side: the **Nurse board** tab in the bedside UI (`http://127.0.0.1:8000/`), or `http://127.0.0.1:8000/dashboard` on its own. One tile per bed
 with the bed number, patient initials, a status colour (green calm, yellow request, red urgent), the last thing the patient
 mouthed and how long ago; the live bed's tile is the glasses camera. **Bed 4 is the real patient; the other six beds are
 simulated** so the unit looks like a unit, and the board says so. Requests are listed by urgency with an **Acknowledge** button

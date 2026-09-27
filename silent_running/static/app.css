@@ -14,7 +14,6 @@ header h1{font-size:18px;margin:0;letter-spacing:.3px;font-weight:600}
 header h1 b{font-weight:800}
 header .sub{color:var(--muted);font-size:12px}
 .spacer{flex:1}
-.boardlink{color:var(--muted);font-size:12px;text-decoration:none;border:1px solid var(--line);border-radius:8px;padding:5px 10px}.boardlink:hover{color:var(--text);border-color:var(--muted)}
 .statuspill{display:flex;align-items:center;gap:8px;padding:6px 12px;border-radius:999px;border:1px solid var(--line);background:var(--panel2);font:700 11px Inter;letter-spacing:1.4px;text-transform:uppercase;color:var(--muted)}
 .statuspill i{width:8px;height:8px;border-radius:50%;background:var(--dim)}
 .statuspill.listening{color:var(--fused);border-color:rgba(90,169,255,.5)}.statuspill.listening i{background:var(--fused);animation:pulse 1s infinite}
@@ -30,6 +29,8 @@ main{min-height:0;overflow:auto}
 .tab.on{display:grid}
 #tab-patient{grid-template-columns:minmax(360px,36%) 1fr;grid-template-rows:minmax(0,1fr);height:100%}  /* bounded, so the log scrolls inside its panel */
 #tab-dev{grid-template-columns:minmax(360px,40%) 1fr}
+#tab-board{padding:0;height:100%;grid-template-columns:1fr;grid-template-rows:minmax(0,1fr)}  /* the board is its own page, embedded whole */
+#tab-board iframe{width:100%;height:100%;border:0;display:block;background:#F4F5F7}
 .col{display:flex;flex-direction:column;gap:14px;min-height:0;min-width:0}
 .panel{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);padding:14px 16px;flex-shrink:0;min-width:0}
 .panel.slim{padding:10px 14px}

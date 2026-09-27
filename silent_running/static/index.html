@@ -17,11 +17,10 @@ const V=Date.now();document.write(`<link rel="stylesheet" href="/static/app.css?
 <header>
   <div class="brand"><span class="mark"></span><h1>Silent <b>Running</b></h1></div>
   <div class="sub">ICU silent-speech communicator · <span id="engine" class="mono"></span></div>
-  <a class="boardlink" href="/dashboard" target="_blank" title="Charge nurse unit board: every bed, requests, time to acknowledge">Unit board ↗</a>
   <div class="spacer"></div>
   <div class="warmup" id="warmup" hidden title="The voice-timing model is still loading; decodes can take several seconds until it finishes">warming up · first reads are slower</div>
   <div class="statuspill idle" id="statuspill"><i></i><span>idle</span></div>
-  <div class="toggle tabs" id="tabs"><button data-tab="patient" class="on">Patient</button><button data-tab="dev">Dev</button></div>
+  <div class="toggle tabs" id="tabs"><button data-tab="patient" class="on">Patient</button><button data-tab="board">Nurse board</button><button data-tab="dev">Dev</button></div>
   <div class="toggle" id="mode"><button data-mode="phrase" class="on">Phrase</button><button data-mode="open">Open</button></div>
 </header>
 <main>
@@ -177,6 +176,10 @@ const V=Date.now();document.write(`<link rel="stylesheet" href="/static/app.css?
       <div class="small mono">camera → MediaPipe face + blendshapes + nonverbal signals (separate process) → 96×96 mouth crops @25fps → Auto-AVSR conformer (MPS) → CTC greedy + phrase scoring + beam n-best → context prior / LLM fusion + visual verify → confirm loop → ElevenLabs → play</div>
     </div>
   </div>
+</section>
+<!-- ============================ NURSE BOARD TAB: the charge nurse unit board (/dashboard), same server, same camera ============================ -->
+<section class="tab" id="tab-board">
+  <iframe id="boardframe" title="Charge nurse unit board" data-src="/dashboard"></iframe>
 </section>
 </main>
 
