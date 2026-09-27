@@ -78,7 +78,7 @@ LLM_PROVIDERS = {"grok": ("XAI_API_KEY", "https://api.x.ai/v1", "grok-4.20-0309-
 class LLMInterpreter:
     """Open Mode's interpreter (server._bg_llm): proposes what the patient meant; the visual model verifies each proposal.
     provider: grok (XAI_API_KEY) | openai (OPENAI_API_KEY), read from the environment / project .env."""
-    def __init__(self, provider="grok", model=None, timeout=20):
+    def __init__(self, provider="grok", model=None, timeout=4.0):
         from dotenv import load_dotenv
         load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env"))
         self.key_var, base_url, default_model = LLM_PROVIDERS[provider]
@@ -87,7 +87,9 @@ class LLMInterpreter:
         self.client = None
         if self.key:
             from openai import OpenAI
-            self.client = OpenAI(api_key=self.key, base_url=base_url, timeout=timeout)
+            # One attempt, bounded: Open Mode speaks after the verdict, and a hung call used to take 60 s (20 s x 3 attempts)
+            # before the raw reading was spoken. The default model answers in 1.3-1.7 s.
+            self.client = OpenAI(api_key=self.key, base_url=base_url, timeout=timeout, max_retries=0)
 
     def available(self):
         return self.client is not None
