@@ -51,6 +51,23 @@ macOS drains it from a user-space driver (com.apple.DriverKit-AppleUSBCHCOM) tha
 bytes are lost, and sometimes it wedges until the port is reopened (a standalone reader under the same load saw both).
 The server runs at lower priority with `--source serial` so the driver wins; the reopen is detected after 0.5 s. WCH's
 own driver made it worse (24% damaged). A CP2102/FTDI adapter (hundreds of bytes of buffer) would remove it at the source.
+## Charge nurse unit board (`/dashboard`)
+
+The provider side: `http://127.0.0.1:8000/dashboard` (also the **Unit board** link in the bedside UI header). One tile per bed
+with the bed number, patient initials, a status colour (green calm, yellow request, red urgent), the last thing the patient
+mouthed and how long ago; the live bed's tile is the glasses camera. **Bed 4 is the real patient; the other six beds are
+simulated** so the unit looks like a unit, and the board says so. Requests are listed by urgency with an **Acknowledge** button
+and the time-to-acknowledge on every one; the top bar shows open requests, average response time and requests per bed today.
+Clicking a bed opens its detail: the live camera, the laptop's ambient overview, and today's transcript at that bedside, the
+patient's words and the nurse's (typed in the bedside UI, transcribed from the mic, or a note added on the board), timestamped:
+the bedside conversation documents itself.
+
+* `--bed 4 --initials J.G.` name the live bed; `--no-simulate` turns the simulated beds' activity off (they still exist).
+* `--ambient auto|<index>|none`: the ambient overview is the laptop's own camera (`/ambient`), preview only, no recognition.
+  It picks the first camera that delivers frames (with an iPhone paired, index 0 can be a Continuity Camera that never does).
+* Everything the board shows is appended to `data/unit/<date>.jsonl` and replayed at startup, so "today" survives a restart.
+  Delete the day's file to start the demo clean. `GET /api/unit` is the snapshot; `POST /api/unit/ack?alert=N` acknowledges.
+
 ## Session logs (read these when something lagged)
 
 Every server start writes `logs/session_<timestamp>.jsonl` (`logs/latest.jsonl` points at the newest). It records, every 5 s,

@@ -25,6 +25,8 @@ from silent_running import sessionlog
 from silent_running import icu_lm
 from silent_running import confirm as confirm_mod
 from silent_running import captures
+from silent_running.unit import Unit
+from silent_running.ambient import AmbientCamera
 
 STATIC = os.path.join(ROOT, "silent_running", "static")
 app = FastAPI(title="Silent Running")
@@ -43,6 +45,7 @@ STATE = {"mode": "phrase", "auto_listen": False, "voice": None, "expressive": Tr
 clients = set()
 loop = None
 engine = camera = context = phrase_decoder = llm = confirm_loop = capture = None
+unit = ambient = None  # the charge nurse's unit (silent_running/unit.py) and the laptop's ambient camera (ambient.py)
 phrases = load_phrases()            # the curated inventory: what the UI lists and the voice bank pre-synthesizes
 PHRASE_TABLE = load_phrase_table()
 BANK_TABLE = load_phrase_table(BANK_PATH) if os.path.exists(BANK_PATH) else []   # generated ICU utterance bank: extra decoder candidates
@@ -350,6 +353,8 @@ def _patient_said(text, uid, critical, confidence, **log):
     """X is now the patient's words: history (context for the next utterance), conversation log, critical escalation."""
     context.add_history(text)
     _log("patient", text, confidence=confidence, critical=critical, **log)
+    if unit:
+        unit.patient_said(unit.real_bed, text, CATEGORY_OF.get(text.lower()), critical, confidence)
     if critical:
         broadcast({"type": "alert", "utt_id": uid, "text": text, "confidence": confidence, "ts": time.time()})
 
@@ -418,6 +423,8 @@ def _log(who, text, **kw):
     rec = {"ts": time.time(), "who": who, "text": text, **kw}
     LOG.append(rec); del LOG[:-200]
     broadcast({"type": "log", "entry": rec})
+    if who == "nurse" and unit:  # the bedside conversation's other half, documented on the bed
+        unit.nurse_said(unit.real_bed, text, by="bedside nurse")
 
 
 NURSE_PAUSE = 0.7  # s of silence after speech that ends the nurse's question
@@ -571,6 +578,63 @@ async def mjpeg():
 @app.get("/stream")
 def stream():
     return StreamingResponse(mjpeg(), media_type="multipart/x-mixed-replace; boundary=frame")
+
+
+# ----------------------------------------------------------------------------- charge nurse dashboard
+@app.get("/dashboard")
+def dashboard():
+    return HTMLResponse(open(os.path.join(STATIC, "dashboard.html")).read())
+
+
+async def _ambient_mjpeg():
+    boundary = b"--frame"
+    last = None
+    while True:
+        jpg = ambient.jpeg if ambient else None
+        if jpg is not None and jpg is not last:
+            last = jpg
+            yield boundary + b"\r\nContent-Type: image/jpeg\r\nContent-Length: " + str(len(jpg)).encode() + b"\r\n\r\n" + jpg + b"\r\n"
+        await asyncio.sleep(1 / 12)
+
+
+@app.get("/ambient")
+def ambient_stream():
+    """The laptop's own camera (ambient overview of the room), preview only."""
+    if ambient is None:
+        return JSONResponse({"error": "ambient camera off (--ambient none)"}, status_code=404)
+    return StreamingResponse(_ambient_mjpeg(), media_type="multipart/x-mixed-replace; boundary=frame")
+
+
+@app.get("/api/unit")
+def api_unit():
+    if unit is None:
+        return JSONResponse({"error": "no unit"}, status_code=404)
+    return {**unit.snapshot(), "ambient": ambient.info() if ambient else None, "camera": camera.source_info if camera else None}
+
+
+@app.get("/api/unit/bed")
+def api_unit_bed(bed: str):
+    if unit is None or bed not in unit.beds:
+        return JSONResponse({"error": f"no bed {bed}"}, status_code=404)
+    with unit.lock:
+        return unit.bed_view(bed, transcript=True)
+
+
+@app.post("/api/unit/ack")
+def api_unit_ack(alert: int, by: str = "charge nurse"):
+    try:
+        a = unit.ack(alert, by=by)
+    except KeyError as e:
+        return JSONResponse({"error": str(e)}, status_code=404)
+    return {"ok": True, "alert": a, "metrics": unit.metrics()}
+
+
+@app.post("/api/unit/nurse")
+def api_unit_nurse(bed: str, text: str, by: str = "charge nurse"):
+    """A note the charge nurse types on a bed's detail view (documented like a bedside line)."""
+    if unit is None or bed not in unit.beds:
+        return JSONResponse({"error": f"no bed {bed}"}, status_code=404)
+    return {"ok": True, "line": unit.nurse_said(bed, text.strip(), by=by)}
 
 
 def _voice_id(voice):
@@ -1192,7 +1256,7 @@ async def _startup():
 
 
 def main():
-    global engine, camera, context, phrase_decoder, llm, confirm_loop, capture
+    global engine, camera, context, phrase_decoder, llm, confirm_loop, capture, unit, ambient
     ap = argparse.ArgumentParser()
     ap.add_argument("--source", default=None, help="video source: webcam[:N] | usb[:N|name] | file:path.mp4[?loop=0&realtime=0] | stream:<ESP32 host>[?window=2x] | serial[?window=2x] (ESP32-CAM over USB) (default: webcam auto-detect)")
     ap.add_argument("--camera", type=int, default=-1, help="shorthand for --source webcam:N; -1 = auto-detect first live camera")
@@ -1208,6 +1272,10 @@ def main():
     ap.add_argument("--voice", default=None, help="default TTS voice: cloned speaker name or stock ElevenLabs voice name (e.g. Bella)")
     ap.add_argument("--no-camera", action="store_true")
     ap.add_argument("--profile", default=None, help="enrolled patient profile to activate at start (data/profiles/<name>.pt)")
+    ap.add_argument("--ambient", default="auto", help="ambient overview camera for the dashboard: auto (the first laptop camera that delivers frames), an index, or none")
+    ap.add_argument("--bed", default=os.environ.get("SR_BED", "4"), help="the live patient's bed number on the dashboard")
+    ap.add_argument("--initials", default=os.environ.get("SR_INITIALS", "J.G."), help="the live patient's initials on the dashboard")
+    ap.add_argument("--no-simulate", action="store_true", help="dashboard: no simulated beds' activity")
     ap.add_argument("--confirm-timeout", type=float, default=confirm_mod.TIMEOUT, help="seconds to wait for a nod/shake after 'Sounds like: X?'")
     args = ap.parse_args()
     if (args.source or "").startswith("serial"):
@@ -1242,6 +1310,10 @@ def main():
                                        "model_dir": STATE["model_dir"], "profile": args.profile, "n_phrases": len(phrases),
                                        "scoring": {k: v for k, v in os.environ.items() if k.startswith("SR_")}})
         print(f"[capture] logging live utterances to {os.path.relpath(capture.path, ROOT)}")
+    unit = Unit(real_bed=args.bed, real_initials=args.initials, emit=broadcast, simulate=not args.no_simulate)
+    print(f"[unit] {len(unit.beds)} beds (live: bed {unit.real_bed}), {len(unit.alerts)} alerts on file for today")
+    if args.ambient != "none":
+        ambient = AmbientCamera(index=None if args.ambient == "auto" else int(args.ambient))
     threading.Thread(target=_signal_worker, daemon=True).start()  # camera signals, including cameras created later via /api/source
     llm = OpenAIChooser(model=args.llm)
     print(f"[llm] openai {args.llm} available={llm.available()}")

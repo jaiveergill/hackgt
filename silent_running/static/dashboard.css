@@ -1,0 +1,152 @@
+/* Charge nurse unit board. Bright, quiet, one ink; the only colour on the page is a bed's status, so a red tile is visible
+   from across the station. Type: Public Sans with tabular figures for every time. */
+:root{
+  --paper:#F4F5F7;--surface:#FFFFFF;--ink:#1A1E24;--ink2:#5F6873;--ink3:#9AA3AE;--line:#E3E6EA;--line2:#D3D8DE;
+  --calm:#178A5E;--calm-bg:#E7F5EE;
+  --request:#B86E00;--request-bg:#FCF1DD;
+  --urgent:#C4262E;--urgent-bg:#FBE7E8;
+  --focus:#2B6CB0;
+  --r:10px;--r-sm:6px;
+}
+*{box-sizing:border-box}
+[hidden]{display:none!important}
+html,body{margin:0;height:100%}
+body{background:var(--paper);color:var(--ink);font-family:"Public Sans",system-ui,-apple-system,sans-serif;font-size:14px;line-height:1.4;
+  -webkit-font-smoothing:antialiased;font-feature-settings:"tnum" 1;display:grid;grid-template-rows:64px 1fr;height:100vh;overflow:hidden}
+a{color:inherit}
+button{font:inherit;color:inherit}
+h2,h3{margin:0;font-weight:600}
+:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+
+/* ---------------------------------------------------------------- top bar */
+.top{display:flex;align-items:center;gap:32px;padding:0 24px;background:var(--surface);border-bottom:1px solid var(--line)}
+.unit{display:flex;align-items:baseline;gap:12px;min-width:0}
+.brand{font-weight:700;text-decoration:none;letter-spacing:-.01em;font-size:15px}
+.unitname{color:var(--ink2)}
+.live{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--ink3);margin-left:6px}
+.live i{width:7px;height:7px;border-radius:50%;background:var(--ink3)}
+.live.on{color:var(--calm)}.live.on i{background:var(--calm)}
+.live.off{color:var(--urgent)}.live.off i{background:var(--urgent)}
+.metrics{display:flex;gap:36px;margin:0 0 0 auto;padding:0}
+.m{display:flex;flex-direction:column;gap:1px}
+.m dt{font-size:12px;color:var(--ink2)}
+.m dd{margin:0;font-size:22px;font-weight:600;letter-spacing:-.02em;line-height:1.1}
+.m dd small{font-size:13px;font-weight:500;color:var(--ink2);margin-left:6px}
+.m.hot dd{color:var(--urgent)}
+.clock{font-size:13px;color:var(--ink2);min-width:64px;text-align:right}
+
+/* ---------------------------------------------------------------- layout */
+main{display:grid;grid-template-columns:1fr 360px;min-height:0}
+.board,.detail{padding:20px 24px;overflow:auto;min-width:0}
+.boardhead,.detailhead{display:flex;align-items:baseline;gap:16px;margin-bottom:14px;flex-wrap:wrap}
+.boardhead h2,.detailhead h2{font-size:18px;letter-spacing:-.01em}
+.note{margin:0;color:var(--ink2);font-size:13px}
+
+/* ---------------------------------------------------------------- bed tiles */
+.tiles{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+.tile{position:relative;display:flex;flex-direction:column;background:var(--surface);border:1px solid var(--line);border-left:4px solid var(--calm);
+  border-radius:var(--r);padding:14px 16px 14px 14px;min-height:150px;text-align:left;cursor:pointer;overflow:hidden;transition:border-color .15s}
+.tile:hover{border-color:var(--line2);border-left-color:var(--calm)}
+.tile.request{border-left-color:var(--request);background:var(--request-bg)}
+.tile.request:hover{border-left-color:var(--request)}
+.tile.urgent{border-left-color:var(--urgent);background:var(--urgent-bg)}
+.tile.urgent:hover{border-left-color:var(--urgent)}
+.tile .row{display:flex;align-items:baseline;gap:8px}
+.tile .bed{font-size:15px;font-weight:700}
+.tile .ini{color:var(--ink2)}
+.tile .tag{margin-left:auto;font-size:11px;color:var(--ink3);border:1px solid var(--line2);border-radius:999px;padding:1px 7px}
+.tile .tag.live{color:var(--urgent);border-color:transparent;background:var(--surface);padding-left:6px}
+.tile .tag.live::before{content:"";display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--urgent);margin-right:5px;vertical-align:1px}
+.tile .said{flex:1;margin:12px 0 8px;font-size:18px;font-weight:500;line-height:1.25;letter-spacing:-.01em;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.tile .said.quiet{color:var(--ink3);font-weight:400;font-size:14px}
+.tile .foot{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--ink2)}
+.status{display:inline-flex;align-items:center;gap:6px;font-weight:600;font-size:12px;color:var(--calm)}
+.status i{width:8px;height:8px;border-radius:50%;background:currentColor;flex:none}
+.status.request{color:var(--request)}
+.status.urgent{color:var(--urgent)}
+.status.urgent i{animation:beat 1.2s ease-in-out infinite}
+@keyframes beat{0%,100%{transform:scale(1);opacity:1}50%{transform:scale(1.5);opacity:.55}}
+@media (prefers-reduced-motion:reduce){.status.urgent i{animation:none}}
+.foot .ago{margin-left:auto}
+/* the live bed: its camera is the tile's top half */
+.tile.real{padding-top:0}
+.tile.real .video{margin:0 -16px 10px -14px;aspect-ratio:16/9;background:#0F1317;overflow:hidden;position:relative}
+.tile.real .video img{width:100%;height:100%;object-fit:cover;display:block}
+.tile.real .video .camlabel{position:absolute;left:10px;bottom:8px}
+/* ambient tile: same footprint as a bed */
+.tile.ambient{padding:0;cursor:default;border-left-width:1px;border-left-color:var(--line)}
+.tile.ambient .video{flex:1;background:#0F1317;position:relative;min-height:120px}
+.tile.ambient .video img{width:100%;height:100%;object-fit:cover;display:block;position:absolute;inset:0}
+.tile.ambient .cap{padding:10px 14px;display:flex;align-items:baseline;gap:8px;font-size:12px;color:var(--ink2);border-top:1px solid var(--line)}
+.tile.ambient .cap b{color:var(--ink);font-weight:600;font-size:13px}
+.tile.ambient .cap .fps{margin-left:auto;color:var(--ink3)}
+.camlabel{font-size:11px;font-weight:600;color:#fff;background:rgba(15,19,23,.7);border-radius:4px;padding:2px 7px;letter-spacing:.01em}
+.nocam,.unavail{position:absolute;inset:0;display:grid;place-items:center;color:var(--ink3);font-size:13px;padding:12px;text-align:center}
+.unavail{color:#B9C0C8}
+
+/* ---------------------------------------------------------------- bed detail */
+.back{display:inline-block;text-decoration:none;color:var(--ink2);font-size:13px;margin-bottom:6px}
+.back:hover{color:var(--ink)}
+.detailhead{flex-direction:column;align-items:flex-start;gap:4px}
+.who{display:flex;align-items:center;gap:14px}
+.detailbody{display:grid;grid-template-columns:minmax(300px,42%) 1fr;gap:20px;align-items:start}
+.camcol{display:flex;flex-direction:column;gap:12px;position:sticky;top:0}
+.cam{position:relative;aspect-ratio:4/3;background:#0F1317;border-radius:var(--r);overflow:hidden}
+.cam img{width:100%;height:100%;object-fit:cover;display:block}
+.cam .camlabel{position:absolute;left:12px;top:12px}
+.ambient.small{position:relative;aspect-ratio:16/9;background:#0F1317;border-radius:var(--r);overflow:hidden}
+.ambient.small img{width:100%;height:100%;object-fit:cover;display:block}
+.ambient.small .camlabel{position:absolute;left:12px;top:12px}
+.transcript{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);display:flex;flex-direction:column;min-height:400px;max-height:calc(100vh - 190px)}
+.thead{padding:14px 18px 10px;border-bottom:1px solid var(--line);display:flex;align-items:baseline;gap:12px;flex-wrap:wrap}
+.thead h3{font-size:14px}
+.tsub{font-size:12px;color:var(--ink3)}
+#d-lines{list-style:none;margin:0;padding:8px 0;overflow:auto;flex:1}
+#d-lines li{display:grid;grid-template-columns:88px 96px 1fr;gap:12px;padding:7px 18px;align-items:baseline}
+#d-lines li time{color:var(--ink3);font-size:12px;white-space:nowrap}
+#d-lines li .who{font-size:12px;color:var(--ink2);display:block}
+#d-lines li .txt{font-size:14px}
+#d-lines li.patient .txt{font-weight:500}
+#d-lines li.request .txt::after,#d-lines li.urgent .txt::after{content:attr(data-level);margin-left:8px;font-size:11px;font-weight:600;border-radius:999px;padding:1px 7px;vertical-align:1px}
+#d-lines li.request .txt::after{color:var(--request);background:var(--request-bg)}
+#d-lines li.urgent .txt::after{color:var(--urgent);background:var(--urgent-bg)}
+#d-lines li.nurse .txt{color:var(--ink2)}
+#d-lines .day{padding:10px 18px 4px;font-size:12px;color:var(--ink3)}
+#d-lines .none{padding:24px 18px;color:var(--ink3)}
+.noteform{display:flex;gap:8px;padding:10px 12px;border-top:1px solid var(--line)}
+.noteform input{flex:1;border:1px solid var(--line2);border-radius:var(--r-sm);padding:8px 10px;font:inherit;background:var(--surface)}
+.noteform button{border:1px solid var(--line2);background:var(--surface);border-radius:var(--r-sm);padding:8px 12px;cursor:pointer;font-weight:600}
+.noteform button:hover{background:var(--paper)}
+
+/* ---------------------------------------------------------------- request feed */
+.feed{border-left:1px solid var(--line);background:var(--surface);display:flex;flex-direction:column;min-height:0}
+.feedhead{display:flex;align-items:baseline;gap:10px;padding:20px 20px 12px}
+.feedhead h2{font-size:18px;letter-spacing:-.01em}
+.count{color:var(--ink2);font-size:13px}
+#alerts{list-style:none;margin:0;padding:0 12px 20px;overflow:auto;flex:1}
+.alert{display:grid;grid-template-columns:1fr auto;gap:4px 12px;padding:12px 12px 12px 14px;border-radius:var(--r);border-left:4px solid var(--request);
+  background:var(--request-bg);margin-bottom:8px;align-items:center}
+.alert.urgent{border-left-color:var(--urgent);background:var(--urgent-bg)}
+.alert.done{background:transparent;border-left-color:var(--line2);opacity:.8}
+.alert .head{display:flex;gap:8px;align-items:baseline;font-size:12px;color:var(--ink2);grid-column:1/-1}
+.alert .head b{color:var(--ink);font-size:13px}
+.alert .head .lvl{font-weight:600}
+.alert.urgent .head .lvl{color:var(--urgent)}
+.alert.request .head .lvl{color:var(--request)}
+.alert .text{font-size:15px;font-weight:500;letter-spacing:-.01em}
+.alert .wait{font-size:22px;font-weight:600;letter-spacing:-.02em;line-height:1;text-align:right}
+.alert .wait small{display:block;font-size:11px;font-weight:500;color:var(--ink2);letter-spacing:0;margin-top:3px}
+.alert.urgent .wait{color:var(--urgent)}
+.alert.done .wait{font-size:15px;color:var(--ink2)}
+.alert .ack{grid-column:1/-1;margin-top:6px;justify-self:start;border:1px solid var(--line2);background:var(--surface);border-radius:var(--r-sm);padding:7px 12px;cursor:pointer;font-weight:600;font-size:13px}
+.alert .ack:hover{border-color:var(--ink3)}
+.alert.urgent .ack{background:var(--urgent);border-color:var(--urgent);color:#fff}
+.alert.urgent .ack:hover{filter:brightness(.92)}
+.alert .by{grid-column:1/-1;font-size:12px;color:var(--ink3)}
+.divider{font-size:12px;color:var(--ink3);padding:14px 4px 6px}
+.empty{color:var(--ink3);padding:8px 24px}
+
+@media (max-width:1200px){.tiles{grid-template-columns:repeat(3,minmax(0,1fr))}.metrics{gap:22px}.m dd{font-size:18px}}
+@media (max-width:900px){main{grid-template-columns:1fr}.feed{border-left:0;border-top:1px solid var(--line)}.tiles{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .detailbody{grid-template-columns:1fr}.camcol{position:static}body{overflow:auto;height:auto;grid-template-rows:auto 1fr}.top{flex-wrap:wrap;height:auto;padding:12px 16px;gap:12px}.metrics{margin-left:0;width:100%}}
+@media (max-width:600px){.tiles{grid-template-columns:1fr}.board,.detail{padding:16px}}
