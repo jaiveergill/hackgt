@@ -2,7 +2,7 @@
 scripts/fake_esp32.py's FakeSerialBoard: firmware/usb_cam's protocol on a pseudo-terminal, paced to the cable's 1.5 Mbaud.
 
 Checks: boot noise before the first message is skipped; settings are commanded and acknowledged; frames arrive at the
-sensor's rate with the throughput the cable allows; window=2x gives 400x264 frames and ~1.65x the mouth pixels; bytes lost
+sensor's rate with the throughput the cable allows; window=2x keeps 480x320 frames with 2x the mouth pixels (the board's OV3660), and the zoom changes live; bytes lost
 mid-frame, or a bit flipped inside one (CRC-32), cost only that frame (the parser resyncs); a board that resets mid-stream ends the stream and the reopen restores
 its settings; a board running the WiFi sketch, and a missing port, fail loudly; an unplugged cable ends the stream visibly.
 What it cannot check: the real board (scripts/bench_link.py serial measures that).
@@ -61,9 +61,13 @@ src.release(); board.log.clear()
 src = make_source(f"serial:{board.port}?baud={PTY_BAUD}&window=2x")
 src.open()
 fps, sizes, zoom = frames(src, 4)
-check(board.log[:2] == ["set framesize 9", "set quality 16"] and board.log[2].startswith("win 1 200 168 400 264 400 264"), f"commands {board.log}")
-check(sizes == {(400, 264)}, f"frames {sizes}, and no frame of the old view reached read()")
-check(abs(zoom / base / (792 / 480) - 1) < 0.1, f"mouth {zoom:.1f} px = x{zoom / base:.2f} of {base:.1f} (expected x{792 / 480:.2f})")
+check(board.log == ["set framesize 9", "set quality 16", "sensor", "win 544 450 1535 1097 8 2 2172 719 480 320 0 1"], f"commands {board.log}")
+check(sizes == {(480, 320)}, f"frames {sizes}")
+check(abs(zoom / base / 2 - 1) < 0.1, f"mouth {zoom:.1f} px = x{zoom / base:.2f} of {base:.1f} (expected x2), and no frame of the old view reached read()")
+board.log.clear()
+src.set_zoom(1)
+_, _, back = frames(src, 2)
+check(board.log == ["set framesize 9"] and abs(back / base - 1) < 0.1, f"live 1x: {board.log}, mouth x{back / base:.2f}")
 src.release()
 
 print("3. bytes lost mid-frame (every 4th frame cut short)")
@@ -132,8 +136,43 @@ while time.time() - t0 < 3 and src.read()[0]:
 check(not src.read()[0] and "reset" in (src._err or ""), f"the stream ends with the reason, for the stall recovery: {src._err!r}")
 src.reopen()
 _, sizes, _ = frames(src, 2)
-check(board.log[:2] == ["set framesize 9", "set quality 16"] and board.log[2].startswith("win ") and sizes == {(400, 264)},
+check(board.log[:2] == ["set framesize 9", "set quality 16"] and board.log[2].startswith("win ") and sizes == {(480, 320)},
       f"the reopen pushed everything again: {board.log}, frames {sizes}")
+src.release()
+
+print("5b. every frame damaged for 2.5 s (bytes lost on the link): the stall names it, the reopen keeps the port")
+board = FakeSerialBoard()
+src = make_source(f"serial:{board.port}?baud={PTY_BAUD}&window=2x")
+src.open(); frames(src, 1)
+ser = src._ser
+board.log.clear(); board.damage_until = time.time() + 2.5
+t0 = time.time()
+while time.time() - t0 < 2 and src.read()[0]:
+    pass
+time.sleep(0.5)
+check("damaged" in (src.fault() or ""), f"stall reason: {src.fault()!r}")
+src.reopen()
+fps, sizes, _ = frames(src, 2)
+check(src._ser is ser and board.log[:2] == ["set framesize 9", "set quality 16"] and board.log[2].startswith("win "),
+      f"settings and zoom pushed again on the same open port (no board reset): {board.log}")
+check(fps > 10 and sizes == {(480, 320)}, f"frames again after the burst: {fps:.1f} fps {sizes}")
+src.release()
+
+print("5c. nothing arrives for 3 s (a hung board or driver): the stall names it, the reopen reopens the port")
+board = FakeSerialBoard()
+src = make_source(f"serial:{board.port}?baud={PTY_BAUD}")
+src.open(); frames(src, 1)
+ser = src._ser
+board.silent_until = time.time() + 3
+t0 = time.time()
+while time.time() - t0 < 2.5 and src.read()[0]:
+    pass
+time.sleep(1.2)
+check("no bytes" in (src.fault() or ""), f"stall reason: {src.fault()!r}")
+time.sleep(max(board.silent_until - time.time(), 0))
+src.reopen()
+fps, _, _ = frames(src, 2)
+check(src._ser is not ser and fps > 10, f"the port was reopened and frames came back: {fps:.1f} fps")
 src.release()
 
 print("6. cable unplugged")

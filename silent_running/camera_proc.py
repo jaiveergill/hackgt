@@ -276,6 +276,13 @@ def _worker(conn, spec, width, height, preview_width, buffer_seconds):
                 else:
                     frames = resample_25fps(items)[0]
                     out.send(("snapshot", frames))
+            elif cmd[0] == "zoom":  # ESP32-CAM sensor zoom, in place: a second connection to the board can't coexist with this one
+                try:
+                    src.set_zoom(cmd[1])
+                    out.send(("zoom", None, src.info()))
+                except (ValueError, RuntimeError) as e:
+                    out.send(("zoom", str(e), src.info()))
+                prev_patch = stats_prev = None  # the view jumped: not mouth motion, and the pause is not a link gap
             elif cmd[0] == "quit":
                 src.release()
                 return
@@ -432,6 +439,7 @@ class CameraProcess:
         self.source = source
         self.source_info = None
         self.responses = queue.Queue()
+        self.zoom_replies = queue.Queue()
         self.listening = False
         self.on_auto_utterance = None
         self.on_error = None
@@ -557,6 +565,8 @@ class CameraProcess:
         elif msg[0] == "utterance" and len(msg) > 7 and msg[7] == "auto":
             if self.on_auto_utterance:
                 self.on_auto_utterance(self._utt(msg))
+        elif msg[0] == "zoom":
+            self.zoom_replies.put(msg)
         elif msg[0] in ("utterance", "snapshot"):  # replies to stop_listening / snapshot_last
             self.responses.put(msg)
         else:  # a message kind with no handler here must not be taken as the reply to the next request
@@ -593,6 +603,26 @@ class CameraProcess:
             return None
         msg = self.responses.get(timeout=timeout)
         return msg[1]
+
+    def set_zoom(self, zoom, timeout=30.0):
+        """Change the ESP32-CAM's sensor zoom in place (1 = the whole view). Returns the source's info; raises RuntimeError
+        with the reason: a zoom the board can't do leaves it untouched, a board that fails stalls and the stall recovery
+        reopens it at the previous zoom. A capture process restart keeps the new zoom."""
+        from silent_running.sources import with_zoom
+        with self._switch_lock:
+            while not self.zoom_replies.empty():  # a reply that came after an earlier call timed out
+                self.zoom_replies.get_nowait()
+            if not self._send(("zoom", zoom)):
+                raise RuntimeError("camera restarting, try again in a moment")
+            _, err, info = self.zoom_replies.get(timeout=timeout)
+            with self._lock:
+                self.source_info = info
+                if not err:
+                    self.source = with_zoom(self.source, zoom)
+                    self._args = (self.source,) + self._args[1:]
+        if err:
+            raise RuntimeError(err)
+        return info
 
     def stop(self):
         self._quit = True
