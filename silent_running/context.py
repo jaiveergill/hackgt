@@ -89,14 +89,15 @@ class OpenAIChooser:
         The caller must verify the proposal against the visual model before using it."""
         if self.client is None:
             return {"error": "OPENAI_API_KEY not set"}
-        sys_p = ("You are correcting the output of a silent lip-reading model for a hospital patient. You get the model's n-best "
+        sys_p = ("You are correcting the output of a silent lip-reading model for a voiceless ICU patient. You get the model's n-best "
                  "hypotheses (higher score = more visual support; they usually share the correct skeleton and differ in confusable words) "
                  "plus context. Lip reading confuses sounds that look alike on the lips: p/b/m, t/d/n, k/g, f/v, s/z, and most vowels. "
-                 "Write the single most plausible sentence the person actually said. Keep the word count and rhythm of the top hypotheses; "
-                 "only replace words with visually similar alternatives that make the sentence coherent. Do not add new ideas. "
-                 "Output plain text in upper case without punctuation.")
+                 "Write the single most plausible sentence the person actually said, replacing only words with visually similar "
+                 "alternatives. If no correction is clearly better, return the top hypothesis unchanged: a wrong sentence is worse than "
+                 "an uncorrected one. Do not add new ideas. Output plain text in upper case without punctuation.")
         lines = "\n".join(f"{i}. {c['text']} (score {c['score']:.1f})" for i, c in enumerate(candidates))
-        user = f"Context: {json.dumps(context)}\nHypotheses:\n{lines}"
+        ctx = {k: (v[:200] if k == "notes" else v) for k, v in context.items() if v}  # only what exists (rarely a nurse question); notes capped
+        user = (f"Context: {json.dumps(ctx)}\n" if ctx else "") + f"Hypotheses:\n{lines}"
         schema = {"type": "object", "additionalProperties": False, "properties": {"sentence": {"type": "string"}, "reason": {"type": "string"}}, "required": ["sentence", "reason"]}
         try:
             r = self.client.chat.completions.create(model=self.model, temperature=0,
