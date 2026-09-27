@@ -286,7 +286,8 @@ def _worker(conn, spec, width, height, preview_width, buffer_seconds):
             now = time.time()
             if src.kind != "file" and now - last_frame >= getattr(src, "stall_s", STALL_S) and now - last_reopen >= retry_s:
                 # unplugged / dead camera: say so (UI error event) and try to reopen instead of freezing silently
-                out.send(("error", f"{src.kind} camera delivered no frames for {now - last_frame:.1f}s; reopening"))
+                why = src.fault()
+                out.send(("error", f"{src.kind} camera delivered no frames for {now - last_frame:.1f}s{f' ({why})' if why else ''}; reopening"))
                 try:
                     src.reopen()
                     print(f"[camera] reopened {src.info()}")

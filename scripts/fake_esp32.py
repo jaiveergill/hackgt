@@ -130,6 +130,13 @@ class FakeSerialBoard:
     def reset(self):
         self._reset = True
 
+    def say(self, text):
+        """An unsolicited message, as the firmware sends "err frame capture failed" while streaming."""
+        self._msg(b"T", text.encode())
+
+    def send_raw(self, data):
+        self._write(data)
+
     def _write(self, data):
         time.sleep(len(data) * 10 / self.baud)  # 8N1: 10 bits per byte
         os.write(self.master, data)
@@ -140,7 +147,7 @@ class FakeSerialBoard:
     def _command(self, line):
         self.log.append(line)
         words = line.split()
-        if words[:1] == ["set"] and len(words) == 3:
+        if words[:1] == ["set"] and len(words) == 3 and words[1] in ("framesize", "quality"):  # all firmware/usb_cam knows
             code = self.board.control("/control", {"var": words[1], "val": words[2]})
         elif words[:1] == ["win"] and len(words) == 8:
             code = self.board.control("/resolution", dict(zip(("sx", "offx", "offy", "tx", "ty", "ox", "oy"), words[1:])))
