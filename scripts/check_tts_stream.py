@@ -1,15 +1,17 @@
-"""Check /api/tts_stream: it streams a clip that is not cached and caches it only once the stream has completed. No network,
-no model: the ElevenLabs client is a fake whose stream yields 5 chunks of 1000 bytes, and the cache goes to a temp dir.
+"""Check /api/tts_stream: it streams a clip that is not cached and caches it only once its generation has completed. No
+network, no model: the ElevenLabs client is a fake whose stream yields 5 chunks of 1000 bytes, and the cache goes to a temp dir.
 
   python scripts/check_tts_stream.py
 
-Cases (the first two cached a truncated clip that every later playback of the phrase then used):
-  client stops after 1 chunk        (the UI replaced the audio source)  -> not cached
+Cases (a truncated clip in the cache would be what every later playback of the phrase used):
+  client stops after 1 chunk        (the UI replaced the audio source)  -> the generation goes on: cached whole, 5000 bytes
   upstream fails after 2 chunks     (ElevenLabs error mid-stream)       -> not cached, an `error` event, the stream aborts
   full clip                                                             -> cached, 5000 bytes; the next request is served whole
+  prefetched, then requested        (Open Mode: the voice starts while the LLM decides) -> the request joins the running
+                                    generation: one upstream call, all 5 chunks
 Prints expected vs actual; exit 1 on a failure.
 """
-import asyncio, os, shutil, sys, tempfile
+import asyncio, os, shutil, sys, tempfile, time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import silent_running.server as srv
@@ -24,11 +26,16 @@ EVENTS = []
 srv.broadcast = EVENTS.append
 
 
+CALLS = []
+
+
 class FakeElevenLabs:
     class text_to_speech:
         @staticmethod
         def stream(**kw):
+            CALLS.append(kw["text"])
             for i in range(5):
+                time.sleep(0.02)
                 if kw["text"].startswith("ERR") and i == 2:
                     raise RuntimeError("ElevenLabs 500 mid-stream")
                 yield bytes([65 + i]) * 1000
@@ -59,9 +66,16 @@ async def consume(text, n):
     return got, raised
 
 
-for text, n, want_cached in (("Client stops after 1 chunk", 1, False), ("ERR upstream fails after 2 chunks", 99, False), ("Full clip", 99, True)):
+def generated():
+    """Wait for the generations in progress to finish (they run on their own threads)."""
+    while eltts._generating:
+        time.sleep(0.01)
+
+
+for text, n, want_cached in (("Client stops after 1 chunk", 1, True), ("ERR upstream fails after 2 chunks", 99, False), ("Full clip", 99, True)):
     EVENTS.clear()
     got, raised = asyncio.run(consume(text, n))
+    generated()
     audio = eltts.cached(text, "VOICE")
     print(f"{text!r}: read {got} chunks, stream raised {raised!r}")
     check((audio is not None) == want_cached and (audio is None or len(audio) == 5000), f"{text!r} cached",
@@ -76,6 +90,17 @@ for text, n, want_cached in (("Client stops after 1 chunk", 1, False), ("ERR ups
               f"events {errs}, raised {raised!r}")
     else:
         check(not EVENTS, f"{text!r} raises no error event", "none", EVENTS)
+
+generated()
+CALLS.clear()
+eltts.prefetch("Prefetched", "VOICE")
+time.sleep(0.05)  # the request comes while the clip is being generated
+got, raised = asyncio.run(consume("Prefetched", 99))
+generated()
+check((CALLS, got, raised) == (["Prefetched"], 5, None), "a request joins the prefetched generation",
+      "one upstream call, 5 chunks, no error", f"calls {CALLS}, {got} chunks, raised {raised!r}")
+check(len(eltts.cached("Prefetched", "VOICE") or b"") == 5000, "the prefetched clip is cached", "5000 bytes",
+      f"{len(eltts.cached('Prefetched', 'VOICE') or b'')} bytes")
 
 shutil.rmtree(eltts.CACHE_DIR)
 print("CHECK_TTS_STREAM " + ("PASSED" if not failures else f"FAILED: {failures}"))

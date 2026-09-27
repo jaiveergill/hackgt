@@ -75,6 +75,19 @@ Accuracy: unchanged. MIRACL through the camera path (FaceLandmarker, auto-listen
 - End to end (`scripts/eval_latency.py`) could not be measured this time: other workspaces' servers had the 8 GB laptop
   paging (load 5.6-22.4), and main and this branch both returned results for under 7 of 40 clips, with 18-24 s encodes.
 
+## Open Mode in parallel (2026-09-27, branch `open-mode-latency`)
+
+Open Mode was one chain: beam search -> Grok -> verification -> voice. Measured offline on 24 MIRACL clips: beam 0.56 s,
+Grok 1.36 s, verification 0.07 s, then the voice (rarely cached for a free sentence). Two steps now overlap:
+- **Grok's reply is streamed.** Its sentences are complete at 0.64 s, the whole reply (with the reason written after them)
+  at 1.22 s (median of 10). The verdict is verified and sent as soon as the sentences are in; the reason follows (`llm_reason`).
+- **The voice of the raw reading starts while Grok decides** (`tts.prefetch`). Grok kept it on 15/24 clips; the UI's request
+  then joins the generation already running (`tts` runs each clip once on its own thread; every request reads it).
+`scripts/eval_latency.py --mode open --voice Bella`, 40 MIRACL clips, branch then main back to back (load 4.8-8.2): end of
+mouthing -> first audio 2.62 s median (p90 3.77) vs 3.49 s (4.49); result -> first audio, the part this changes, 0.90 s vs
+1.39 s (the voice part understated: main ran second, with the clips the branch had cached). What is left: the hang (0.35 s),
+the beam search (0.56 s idle, CPU) and Grok's first sentences (~0.6 s).
+
 ## What was not ported, and why
 
 - **Deciding while the mouth is still moving** (fast-path's streaming commit). Offline on the same 397 clips (the review's
