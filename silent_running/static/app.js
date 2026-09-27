@@ -41,12 +41,16 @@ function meta(m){
   $('#camwrap').classList.toggle('listening',!!m.listening);
   setMouthing(mouthingSig||!!m.mouth_active,false);
   showHands(m.hands);
-  showZoom(m.source);
+  showZoom(m.source);showRotate(m.source);
   drawOverlay(m);
 }
 // ESP32-CAM sensor zoom (its sources report zoom): the board re-windows its sensor in place, ~1 s without frames
 function showZoom(src){const z=$('#zoom');z.hidden=!src||src.zoom==null;if(z.hidden||z.classList.contains('busy'))return;
   $$('#zoom button').forEach(b=>b.classList.toggle('on',+b.dataset.z===src.zoom));}
+// rotation (every source reports it): turned on the laptop, so it is instant
+function showRotate(src){const b=$('#rotate');b.hidden=!src||src.rotate==null;if(!b.hidden&&!b.classList.contains('busy'))b.textContent=`↻ ${src.rotate}°`;}
+$('#rotate').onclick=async()=>{const b=$('#rotate'),cur=parseInt(b.textContent.replace(/\D/g,''))||0;b.classList.add('busy');
+  try{await fetch('/api/rotate?degrees='+((cur+90)%360),{method:'POST'});}finally{b.classList.remove('busy');}};  // a refusal arrives as an error event
 $$('#zoom button').forEach(b=>b.onclick=async()=>{const z=$('#zoom');z.classList.add('busy');
   try{await fetch('/api/zoom?zoom='+b.dataset.z,{method:'POST'});}finally{z.classList.remove('busy');}});  // a refusal arrives as an error event
 function showHands(st){  // "on" | "off: <reason>" (e.g. a missing model), so a disabled hand tracker is visible to the operator

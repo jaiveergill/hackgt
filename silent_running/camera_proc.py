@@ -196,7 +196,7 @@ def _worker(conn, spec, width, height, preview_width, buffer_seconds):
     import cv2
     sys.path.insert(0, ROOT)
     from silent_running.expression import FaceLandmarker, ExpressionTracker
-    from silent_running.sources import make_source
+    from silent_running.sources import make_source, rotate_frame
     from silent_running.signals.aggregate import Signals
     fl = FaceLandmarker()
     expr = ExpressionTracker()
@@ -307,6 +307,10 @@ def _worker(conn, spec, width, height, preview_width, buffer_seconds):
                 except (ValueError, RuntimeError) as e:
                     out.send(("zoom", str(e), src.info()))
                 prev_patch = stats_prev = None  # the view jumped: not mouth motion, and the pause is not a link gap
+            elif cmd[0] == "rotate":  # a camera mounted sideways: every frame is turned before tracking
+                src.rotate = cmd[1]
+                out.send(("rotate", None, src.info()))
+                prev_patch = None
             elif cmd[0] == "quit":
                 src.release()
                 return
@@ -329,6 +333,8 @@ def _worker(conn, spec, width, height, preview_width, buffer_seconds):
             time.sleep(0.005)
             continue
         last_frame, retry_s = time.time(), STALL_S
+        if src.rotate:
+            bgr = rotate_frame(bgr, src.rotate)
         # ---- frame arrival stats for the session log (every 5 s): fps, p95 interval, gaps > 0.3 s, worst gap, face rate
         if stats_prev is not None and not src.discontinuity:
             d = ts - stats_prev
@@ -470,7 +476,7 @@ class CameraProcess:
         self.source = source
         self.source_info = None
         self.responses = queue.Queue()
-        self.zoom_replies = queue.Queue()
+        self.control_replies = queue.Queue()  # answers to set_zoom / set_rotate (one at a time: _switch_lock)
         self.listening = False
         self.on_auto_utterance = None
         self.on_error = None
@@ -600,8 +606,8 @@ class CameraProcess:
         elif msg[0] == "ahead":
             if self.on_ahead:
                 self.on_ahead(msg[1], msg[2])
-        elif msg[0] == "zoom":
-            self.zoom_replies.put(msg)
+        elif msg[0] in ("zoom", "rotate"):
+            self.control_replies.put(msg)
         elif msg[0] in ("utterance", "snapshot"):  # replies to stop_listening / snapshot_last
             self.responses.put(msg)
         else:  # a message kind with no handler here must not be taken as the reply to the next request
@@ -643,17 +649,25 @@ class CameraProcess:
         """Change the ESP32-CAM's sensor zoom in place (1 = the whole view). Returns the source's info; raises RuntimeError
         with the reason: a zoom the board can't do leaves it untouched, a board that fails stalls and the stall recovery
         reopens it at the previous zoom. A capture process restart keeps the new zoom."""
-        from silent_running.sources import with_zoom
+        return self._control("zoom", zoom, "window", None if float(zoom) == 1 else f"{float(zoom):g}x", timeout)
+
+    def set_rotate(self, degrees, timeout=10.0):
+        """Turn every frame clockwise by 0/90/180/270 degrees from now on (a camera mounted sideways)."""
+        return self._control("rotate", degrees, "rotate", degrees or None, timeout)
+
+    def _control(self, cmd, value, key, spec_value, timeout):
+        """Send a live change to the capture process; on success the spec records it, so a restart keeps it."""
+        from silent_running.sources import with_param
         with self._switch_lock:
-            while not self.zoom_replies.empty():  # a reply that came after an earlier call timed out
-                self.zoom_replies.get_nowait()
-            if not self._send(("zoom", zoom)):
+            while not self.control_replies.empty():  # a reply that came after an earlier call timed out
+                self.control_replies.get_nowait()
+            if not self._send((cmd, value)):
                 raise RuntimeError("camera restarting, try again in a moment")
-            _, err, info = self.zoom_replies.get(timeout=timeout)
+            _, err, info = self.control_replies.get(timeout=timeout)
             with self._lock:
                 self.source_info = info
                 if not err:
-                    self.source = with_zoom(self.source, zoom)
+                    self.source = with_param(self.source, key, spec_value)
                     self._args = (self.source,) + self._args[1:]
         if err:
             raise RuntimeError(err)

@@ -123,7 +123,9 @@ python scripts/captures.py rescore    # re-read every labelled clip with this ch
 * ESP32-CAM zoom: the **1x / 2x** toggle on the camera view, or `window=2x` in the source spec (`serial?window=2x`,
   `stream:172.20.10.2?window=2x`). 2x makes the OV3660 read only the centre half of its view, 2x the pixels across the
   mouth at the same frame rate; that is the most detail it gives at this frame rate (beyond 2x frames would only be
-  scaled up, so the server refuses). `scripts/check_stream_window.py` and `scripts/check_serial_source.py` check our side
+  scaled up, so the server refuses).
+* Camera mounted sideways: the **↻** button on the camera view turns the image 90° clockwise per click (live, on the
+  laptop: any camera), or `rotate=90|180|270` in the source spec (`serial?rotate=90`). Tracking and crops see it upright. `scripts/check_stream_window.py` and `scripts/check_serial_source.py` check our side
   against a fake OV3660 board.
 * Mouth at normal or slightly slower pace with clear articulation; hold Listen a beat before and after.
 * Utterances of 1-3 s work best; the model saw 25 fps TED talks, so keep the head reasonably still.
