@@ -127,7 +127,7 @@ const V=Date.now();document.write(`<link rel="stylesheet" href="/static/app.css?
     </div>
     <div class="panel settings">
       <label><input type="checkbox" id="autolisten"> hands-free (auto-detect mouth movement)</label>
-      <label><input type="checkbox" id="llm" checked> LLM propose + visual verify (Open Mode)</label>
+      <label><input type="checkbox" id="llm" checked> LLM (Grok) proposes + the video verifies</label>
       <label>force emotion <select id="override"><option value="">from face</option><option>angry</option><option>warm</option><option>sad</option><option>surprised</option><option value="neutral">neutral</option></select></label>
       <details><summary>eval</summary><div class="row" style="margin-top:6px"><input class="txt" id="speaker" placeholder="speaker" style="width:120px"><button class="btn" id="save">Save last 6 s as sample of selected phrase</button></div></details>
     </div>

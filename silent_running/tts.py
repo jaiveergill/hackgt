@@ -4,7 +4,7 @@
   synth(text, voice_id)               -> mp3 bytes  (cached by sha1(voice_id, text) in data/tts_cache/)
   synth_stream(text, voice_id, ...)   -> the same, chunk by chunk as it is generated
   prefetch(text, voice_id, ...)       -> starts generating a clip that a request will likely ask for soon
-  prewarm_phrase_bank(voice_id)       -> synthesizes every phrase in phrases.txt so Phrase Mode plays instantly
+  prewarm_phrase_bank(voice_id)       -> synthesizes every phrase in phrases.txt so the phrases play instantly
 """
 import os, json, hashlib, subprocess, tempfile, threading, time
 
@@ -228,7 +228,7 @@ def prefetch(text, voice_id, emotion="neutral", intensity=0.0, rate=1.0):
 
 
 def prewarm_phrase_bank(voice_id, phrases=None, expressive=True):
-    """Pre-synthesize every phrase: neutral + (angry, warm, sad) x (mild, strong) so Phrase Mode plays instantly."""
+    """Pre-synthesize every phrase: neutral + (angry, warm, sad) x (mild, strong) so the phrases play instantly."""
     if phrases is None:
         phrases = [l.strip() for l in open(os.path.join(ROOT, "silent_running", "phrases.txt")) if l.strip() and not l.startswith("#")]
     variants = [("neutral", 0.0)] + ([(e, i) for e in ("angry", "warm", "sad") for i in (0.6, 0.9)] if expressive else [])
