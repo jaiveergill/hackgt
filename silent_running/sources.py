@@ -14,8 +14,8 @@ Spec strings (server `--source`):
   stream:172.20.10.2?window=2x   the same, the sensor reading only the centre half of its view: 1.67x the pixels across the
                     mouth at the same frame rate (see ov2640_window)
   serial[:/dev/cu.usbserial-XXXX][?baud=1500000&window=2x]   the ESP32-CAM over its USB cable (firmware/usb_cam): no WiFi,
-                    so no freezes when the wearer's head shadows the antenna; framesize and quality (window= stalls on the
-                    board: see ov2640_window)
+                    so no freezes when the wearer's head shadows the antenna; framesize and quality (window= is OV2640-only:
+                    see ov2640_window)
 """
 import json, math, os, re, sys, threading, time, subprocess, zlib
 import urllib.error, urllib.parse, urllib.request
@@ -41,6 +41,10 @@ class VideoSource:
 
     def release(self):
         pass
+
+    def fault(self):
+        """Why the source stopped delivering frames, if it knows (shown in the stall report), else None."""
+        return None
 
     def reopen(self):
         """Reopen after the source stopped delivering frames (e.g. a camera unplugged and plugged back in)."""
@@ -274,8 +278,8 @@ def ov2640_window(zoom, w, h):
     (2x of HVGA: 400x264 frames, half the view). Because the frame size then always changes, it proves the board
     applied the window. Sizes are multiples of 16x8, the JPEG block (every stock frame size is). More detail would need
     UXGA mode (sx=0), whose full-array readout the OV2640 datasheet rates at 15 fps instead of 30.
-    On the real board (esp32-camera in arduino-esp32 3.3.12) set_res_raw stalls capture (0.6 fps) even with the exact
-    registers set_framesize writes, and set_framesize recovers it: open() then fails loudly. Root cause not found yet."""
+    OV2640 only: the team's board has an OV3660 (PID 0x3660), whose set_res_raw takes its own array window and timing
+    registers, so these values stall its capture (0.6 fps) and open() fails loudly. A per-sensor window is a follow-up."""
     if not 400 < w < 800:
         raise ValueError(f"window= needs framesize HVGA (480x320) or VGA (640x480), the sensor's SVGA mode; the board sends {w}x{h}")
     fw, fh = (800, 800 * h / w) if w * 3 >= h * 4 else (600 * w / h, 600)  # the frame size's view: widest centred w:h region
@@ -310,6 +314,7 @@ class Esp32Source(VideoSource):
                 raise ValueError(f"window must be a zoom above 1x and up to 8x (e.g. window=2x), got {window!r}")
         self._frame, self._ts, self._seq, self._seq0, self._got = None, 0.0, 0, 0, 0
         self._err, self._thread = None, None
+        self.board_msg, self._t_board_msg = None, 0.0  # the board's last unsolicited message (e.g. "err frame capture failed")
         self.width = self.height = 0
         self.fps_est = self.mbps_est = 0.0
         self.frame_bytes = self.bad_frames = 0
@@ -318,6 +323,14 @@ class Esp32Source(VideoSource):
         self.window = None   # its /resolution parameters
 
     def open(self):
+        try:
+            self._configure()
+        except Exception:  # whatever step failed, leave no port, socket or reader behind
+            self.release()
+            raise
+        print(f"[source] {self.kind} {self.name} {self.width}x{self.height}" + (f", window {self.zoom:g}x of {self.full[0]}x{self.full[1]}: {self.window}" if self.window else ""))
+
+    def _configure(self):
         for k, v in self.settings.items():
             self._set(k, v)
         if self.zoom and self.window is None:  # first open: the whole view's frame size sets the window's geometry
@@ -334,16 +347,11 @@ class Esp32Source(VideoSource):
         if self.window:
             self._set_window(self.window)
         self._connect()
-        try:
-            if self.window:
-                self._await_size(self.window["ox"], self.window["oy"])
-            elif self.settings:  # read() starts after the frames the board buffered before the change
-                self._size_after(self.BUFFERED + 1)
-                self._got = self._seq - 1
-        except Exception:
-            self.release()
-            raise
-        print(f"[source] {self.kind} {self.name} {self.width}x{self.height}" + (f", window {self.zoom:g}x of {self.full[0]}x{self.full[1]}: {self.window}" if self.window else ""))
+        if self.window:
+            self._await_size(self.window["ox"], self.window["oy"])
+        elif self.settings:  # read() starts after the frames the board buffered before the change
+            self._size_after(self.BUFFERED + 1)
+            self._got = self._seq - 1
 
     def _publish(self, jpg):
         """A received JPEG becomes the newest frame; a corrupt one (bytes lost on the way) is counted and dropped."""
@@ -379,6 +387,13 @@ class Esp32Source(VideoSource):
             time.sleep(0.02)
         self._got = self._seq - 1
 
+    def fault(self):
+        recent = self.board_msg if time.time() - self._t_board_msg < 10 else None
+        return self._err or recent
+
+    def _reset_estimates(self):
+        self._t_est, self._n_est, self._bytes_est = time.time(), 0, 0
+
     def read(self):
         t0 = time.time()
         while self._seq == self._got and time.time() - t0 < 1.0:  # wait for a new frame (like a blocking camera read)
@@ -392,7 +407,7 @@ class Esp32Source(VideoSource):
 
     def info(self):
         return {**super().info(), "fps": round(self.fps_est, 1), "mbps": round(self.mbps_est, 2), "frame_kb": round(self.frame_bytes / 1024, 1),
-                "bad_frames": self.bad_frames, "width": self.width, "height": self.height, "settings": self.settings,
+                "bad_frames": self.bad_frames, "board_msg": self.board_msg, "width": self.width, "height": self.height, "settings": self.settings,
                 **({"zoom": self.zoom, "full": self.full, "window": self.window} if self.zoom else {})}
 
 
@@ -439,6 +454,7 @@ class StreamSource(Esp32Source):
 
     def _connect(self):
         self._stop, self._err, self._seq0 = False, None, self._seq
+        self._reset_estimates()
         req = urllib.request.Request(self.url, headers={"User-Agent": "silent-running"})
         try:
             resp = urllib.request.urlopen(req, timeout=self.timeout)
@@ -521,6 +537,9 @@ def serial_header(kind, payload):
     return b"SRF" + kind + n.to_bytes(4, "little") + bytes([_length_check(n)]) + zlib.crc32(payload).to_bytes(4, "little")
 
 
+MAX_MESSAGE = 1600 * 1200 // 5  # firmware/usb_cam's JPEG buffers (sized for UXGA): no message is longer
+
+
 def _length_check(n):
     return (n ^ n >> 8 ^ n >> 16 ^ n >> 24 ^ 0xA5) & 0xFF
 
@@ -546,16 +565,17 @@ class SerialSource(Esp32Source):
         self.baud = int(settings.pop("baud", 1500000))
         self.port = port or None
         super().__init__(port or "serial", settings, timeout)
-        self._ser, self._texts, self._streaming = None, None, False
+        self._ser, self._texts, self._streaming, self._awaiting = None, None, False, False
 
     def open(self):
         super().open()
         self._streaming = True
 
     def _open_port(self):
-        """Open the port and wait until the board talks: frames, or "ready" after the reset that opening causes (macOS
-        raises DTR/RTS on open, and the ESP32-CAM-MB wires them to EN/IO0: observed on the board, rst:0x1). They are then
-        released, which lets the board run instead of holding it in reset or its bootloader."""
+        """Open the port and wait until the board talks: frames, or "ready" after the reset that opening causes (the
+        ESP32-CAM-MB wires DTR/RTS to EN/IO0 and opening the port pulses them: on the board every open reset it, 3/3 with
+        DTR/RTS preset released and 3/3 releasing RTS before DTR after the open). They are then kept released, so the
+        board runs instead of sitting in reset or its bootloader; the reset costs ~1.5 s per open."""
         if self._ser is not None:
             return
         import queue, serial
@@ -574,6 +594,7 @@ class SerialSource(Esp32Source):
         except serial.SerialException as e:
             raise RuntimeError(f"cannot open {self.name}: {e}")
         self._ser, self._texts, self._err, self._seq0 = ser, queue.Queue(), None, self._seq
+        self._reset_estimates()
         self._thread = threading.Thread(target=self._reader, args=(ser,), daemon=True)
         self._thread.start()
         t0 = time.time()
@@ -587,12 +608,20 @@ class SerialSource(Esp32Source):
 
     def _command(self, line):
         """Send one command; the board answers "ok <line>" or "err <line>"."""
-        import queue, serial
+        import serial
         self._open_port()
+        self._awaiting = True
         try:
-            self._ser.write((line + "\n").encode())
-        except serial.SerialException as e:
-            raise RuntimeError(f"{self.name}: sending '{line}' failed: {e}")
+            try:
+                self._ser.write((line + "\n").encode())
+            except serial.SerialException as e:
+                raise RuntimeError(f"{self.name}: sending '{line}' failed: {e}")
+            self._await_answer(line)
+        finally:
+            self._awaiting = False
+
+    def _await_answer(self, line):
+        import queue
         t0 = time.time()
         while time.time() - t0 < self.timeout:
             if self._err:
@@ -638,7 +667,7 @@ class SerialSource(Esp32Source):
                     if len(buf) < i + 13:
                         del buf[:i]; break
                     kind, n = buf[i + 3], int.from_bytes(buf[i + 4:i + 8], "little")
-                    if kind not in b"JT" or buf[i + 8] != _length_check(n):  # "SRF" inside other bytes, or a damaged header
+                    if kind not in b"JT" or n > MAX_MESSAGE or buf[i + 8] != _length_check(n):  # "SRF" in other bytes, or a damaged header
                         del buf[:i + 3]; continue
                     if len(buf) < i + 13 + n:
                         del buf[:i]; break
@@ -652,8 +681,11 @@ class SerialSource(Esp32Source):
                     elif payload == b"ready" and self._streaming:
                         self._err = f"{self.name}: the board reset (brownout?) and lost its settings; reopening pushes them again"
                         return
-                    else:
+                    elif self._awaiting or not self._streaming:  # an answer to a command, or "ready" during open
                         self._texts.put(payload.decode())
+                    else:  # unsolicited while streaming: keep the latest for fault() and info(), not a growing queue
+                        self.board_msg, self._t_board_msg = payload.decode(), time.time()
+                        print(f"[source] {self.name}: {self.board_msg}")
         except Exception as e:
             if self._ser is ser:
                 self._err = f"{self.name} read failed: {e}"

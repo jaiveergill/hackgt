@@ -41,9 +41,11 @@ Measured on the board (ESP32-CAM-MB on macOS, `scripts/bench_link.py serial`): 2
 gap 0.05-0.11 s over 4 x 15 s runs; WiFi logs showed 1-3.4 s freezes), 5-7 KB per HVGA frame depending on the scene. The
 cable carries ~150 KB/s at 1.5 Mbaud, so bigger frames lower the frame rate instead of freezing it. 2 Mbaud lost a byte in
 60% of frames, 1.5 Mbaud 2%, 1 Mbaud 1%: a damaged frame is dropped by its CRC-32, never read smeared.
-Not working on the board yet: the sensor zoom (`window=`). The board accepts it, but capture then stalls (0.6 fps, "frame
-capture failed") every time, even for a window whose registers equal what `set framesize 9` writes (read back: identical),
-and `set framesize` recovers it. Root cause not found; the WiFi `stream:...?window=` path uses the same driver call.
+Not working on the board yet: the sensor zoom (`window=`). Root cause (found by the kuala-lumpur session): this board's
+camera is an OV3660 (PID 0x3660 at 0x3C), not an OV2640, and `window=` computes OV2640 `set_res_raw` arguments. On the
+OV3660 those arguments are its array window and timing registers, so the call gives an empty window and capture stalls
+(0.6 fps, "frame capture failed"). The OV3660 values for a centred 2x (2x the pixels across the mouth) streamed at 30.7 fps
+in a debug build; the per-sensor window and a live zoom toggle are a follow-up. The WiFi `window=` path has the same bug.
 ## Session logs (read these when something lagged)
 
 Every server start writes `logs/session_<timestamp>.jsonl` (`logs/latest.jsonl` points at the newest). It records, every 5 s,
