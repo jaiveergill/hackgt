@@ -750,16 +750,28 @@ class SerialSource(Esp32Source):
 
     def fault(self):
         silent = time.time() - self._t_bytes
-        return super().fault() or (f"no bytes from the board for {silent:.1f}s (the board, or the USB-serial driver, stopped)" if silent > 1 else None)
+        return super().fault() or (f"no bytes from the board for {silent:.1f}s (the board, or the USB-serial driver, stopped)" if silent > 0.2 else None)
 
     def reopen(self):
-        """After a stall. While bytes are still arriving (a burst of damaged frames, or a board reset whose "ready" was
-        lost) the settings and zoom are pushed again on the open port: reopening it would reset the board (~1.5 s, see
-        _open_port) and fix neither. With nothing arriving, or a dead reader, the port is reopened."""
-        if self._ser is None or self._err or not self._thread.is_alive() or time.time() - self._t_bytes > 0.5:
-            return super().reopen()  # nothing arriving: the board or the USB-serial driver stopped; a port reopen resets both
+        """After a stall. If bytes are still arriving (a burst of damaged frames, or a board reset whose "ready" was lost),
+        the settings and zoom are pushed again on the open port: reopening it would reset the board (~1.5 s, see
+        _open_port) and fix neither. The link streams a byte about every 7 us, so nothing new for 0.1 s means it is not
+        arriving: macOS's CH340 driver wedged (or the board stopped), and only reopening the port revives it."""
+        if self._ser is None or self._err or not self._thread.is_alive() or not self._bytes_arriving():
+            return super().reopen()
         self._streaming = False
-        self.open()
+        try:
+            self.open()
+        except RuntimeError:  # the link wedged after all: open() released the port, so this opens it afresh
+            super().reopen()
+
+    def _bytes_arriving(self):
+        t0 = time.time()
+        while time.time() - t0 < 0.1:
+            if self._ser.in_waiting or time.time() - self._t_bytes < 0.05:  # queued for the reader, or just read by it
+                return True
+            time.sleep(0.01)
+        return False
 
     def release(self):
         self._streaming = False
